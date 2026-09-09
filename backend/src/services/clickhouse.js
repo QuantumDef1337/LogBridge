@@ -1,7 +1,8 @@
 const fetch = require('node-fetch');
 
-function authHeader(cluster) {
-  return 'Basic ' + Buffer.from(`${cluster.username}:${cluster.password}`).toString('base64');
+function authHeaders(cluster) {
+  if (!cluster.password) return {};
+  return { Authorization: 'Basic ' + Buffer.from(`${cluster.username}:${cluster.password}`).toString('base64') };
 }
 
 function buildUrl(cluster, query, extra = '') {
@@ -10,7 +11,7 @@ function buildUrl(cluster, query, extra = '') {
 
 async function query(cluster, sql) {
   const res = await fetch(buildUrl(cluster, sql + ' FORMAT JSON'), {
-    headers: { Authorization: authHeader(cluster) },
+    headers: { ...authHeaders(cluster) },
     timeout: 15000,
   });
   if (!res.ok) {
@@ -24,7 +25,7 @@ async function exec(cluster, sql) {
   // For DDL / statements that return no result set (CREATE, ALTER, etc.)
   const res = await fetch(`${cluster.url}/`, {
     method: 'POST',
-    headers: { Authorization: authHeader(cluster), 'Content-Type': 'text/plain' },
+    headers: { ...authHeaders(cluster), 'Content-Type': 'text/plain' },
     body: sql,
     timeout: 30000,
   });
@@ -63,7 +64,7 @@ async function insertRows(cluster, database, table, ndjson) {
   const res = await fetch(url, {
     method: 'POST',
     headers: {
-      Authorization: authHeader(cluster),
+      ...authHeaders(cluster),
       'Content-Type': 'application/x-ndjson',
     },
     body: ndjson,
