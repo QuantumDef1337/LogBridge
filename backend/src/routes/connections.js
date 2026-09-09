@@ -140,20 +140,18 @@ router.get('/:id/sample-fields', async (req, res) => {
   try {
     let docs;
     try {
-      docs = await os.sampleDocs(decryptRow(row), index_pattern, 1);
+      docs = await os.sampleDocs(decryptRow(row), index_pattern, 10);
     } catch (e) {
       const msg = e.message || '';
-      // Return a friendly empty result for any non-fatal error (index not found, empty, network blip)
-      // so the Field Exclusions UI degrades gracefully instead of showing HTTP 400.
       const warning = msg.includes('404') || msg.includes('index_not_found')
         ? 'No matching index found for this pattern'
         : `Could not fetch sample: ${msg}`;
       return res.json({ fields: [], warning });
     }
     if (!docs.length) return res.json({ fields: [], warning: 'Index exists but contains no documents' });
-    const doc = docs[0];
+    // Union fields across all sampled docs so fields that only appear on some document types are included
     const fieldSet = new Set(['_id', '_index']);
-    for (const [key, val] of Object.entries(doc)) {
+    for (const doc of docs) for (const [key, val] of Object.entries(doc)) {
       fieldSet.add(key);
       // One level of sub-fields for nested objects
       if (val && typeof val === 'object' && !Array.isArray(val)) {
