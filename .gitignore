@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+backend/node_modules/
+
+# SQLite database (contains credentials and pipeline state — never commit)
+*.db
+*.db-shm
+*.db-wal
+
+# Encryption key (NEVER commit — keep this secure)
+*.key
+logbridge.key
+
+# Build output
+frontend/dist/
+frontend/build/
+
+# Logs
+*.log
+nodemon.log
+backend_test.log
+backend_test_err.log
+..pit_test.log
+
+# Environment / secrets
+.env
+.env.*
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code workspace
+.claude/
+
+# Rust build artifacts
+shipper/target/
