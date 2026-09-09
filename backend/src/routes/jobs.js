@@ -31,8 +31,11 @@ router.get('/', (req, res) => {
       ps.last_run_at, ps.last_success_at, ps.last_error,
       ps.rows_inserted_total, ps.rows_inserted_today,
       ps.rows_dlq, ps.rows_failed,
+      ps.rows_skipped_dedup,
       ps.cursor_timestamp, ps.checkpoint_committed_at,
-      ps.last_batch_size
+      ps.last_batch_size, ps.last_run_duration_ms,
+      ps.source_doc_count, ps.event_lag_secs,
+      ps.bytes_processed
     FROM pipelines p
     LEFT JOIN opensearch_connections oc ON p.opensearch_connection_id = oc.id
     LEFT JOIN clickhouse_clusters cc ON p.clickhouse_cluster_id = cc.id
@@ -40,10 +43,23 @@ router.get('/', (req, res) => {
     ORDER BY CASE WHEN p.status='active' THEN 0 ELSE 1 END, p.name
   `).all();
 
+  // Attach per-pipeline consecutive error count from recent logs
+  const errCounts = db.prepare(`
+    SELECT pipeline_id, COUNT(*) as consecutive_errors
+    FROM (
+      SELECT pipeline_id, level, created_at,
+        ROW_NUMBER() OVER (PARTITION BY pipeline_id ORDER BY id DESC) as rn
+      FROM pipeline_logs WHERE pipeline_id IS NOT NULL
+    ) sub
+    WHERE level = 'error' AND rn <= 20
+    GROUP BY pipeline_id
+  `).all();
+  const errMap = new Map(errCounts.map(r => [r.pipeline_id, r.consecutive_errors]));
+
   const jobs = rows.map(r => ({
     ...r,
     is_running: runningIds.has(r.id),
-    // Derive a single display status
+    consecutive_errors: errMap.get(r.id) || 0,
     display_status: runningIds.has(r.id) ? 'running'
       : r.run_status === 'error' ? 'error'
       : r.pipeline_status === 'active' ? 'active'
@@ -118,6 +134,44 @@ router.get('/log-history', (req, res) => {
   `).all(...params, limit, offset);
 
   res.json({ rows, total, page, limit, pages: Math.ceil(total / limit) });
+});
+
+// DLQ: view entries for a pipeline
+router.get('/:id/dlq', (req, res) => {
+  const limit  = Math.min(parseInt(req.query.limit || '50'), 200);
+  const offset = parseInt(req.query.offset || '0');
+  const db = getDb();
+  const total = db.prepare('SELECT COUNT(*) as c FROM pipeline_dlq WHERE pipeline_id=? AND status != ?').get(req.params.id, 'dismissed')?.c || 0;
+  const rows  = db.prepare(`
+    SELECT id, source_index, source_doc_id, event_timestamp, error_message, error_category,
+           retry_count, first_failure_at, last_failure_at, status,
+           substr(document, 1, 500) as document_preview
+    FROM pipeline_dlq WHERE pipeline_id=? AND status != 'dismissed'
+    ORDER BY id DESC LIMIT ? OFFSET ?
+  `).all(req.params.id, limit, offset);
+  res.json({ rows, total });
+});
+
+// DLQ: dismiss one entry
+router.delete('/:id/dlq/:dlqId', (req, res) => {
+  getDb().prepare("UPDATE pipeline_dlq SET status='dismissed' WHERE id=? AND pipeline_id=?")
+    .run(req.params.dlqId, req.params.id);
+  res.json({ ok: true });
+});
+
+// DLQ: dismiss all entries for a pipeline
+router.delete('/:id/dlq', (req, res) => {
+  getDb().prepare("UPDATE pipeline_dlq SET status='dismissed' WHERE pipeline_id=?").run(req.params.id);
+  res.json({ ok: true });
+});
+
+// Per-index progress for a pipeline
+router.get('/:id/indexes', (req, res) => {
+  const rows = getDb().prepare(`
+    SELECT index_name, status, cursor_timestamp, rows_inserted, rows_dlq, last_error, last_run_at
+    FROM pipeline_indexes WHERE pipeline_id=? ORDER BY index_name
+  `).all(req.params.id);
+  res.json(rows);
 });
 
 // Per-pipeline log history

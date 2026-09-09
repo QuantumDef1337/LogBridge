@@ -71,6 +71,10 @@ export const api = {
   getJobLogs: (params = {}) => req('GET', '/jobs/logs?' + new URLSearchParams(params)),
   getPipelineJobLogs: (id, limit = 100) => req('GET', `/jobs/${id}/logs?limit=${limit}`),
   getLogHistory: (params = {}) => req('GET', '/jobs/log-history?' + new URLSearchParams(params)),
+  getDlq: (id, params = {}) => req('GET', `/jobs/${id}/dlq?` + new URLSearchParams(params)),
+  dismissDlqEntry: (id, dlqId) => req('DELETE', `/jobs/${id}/dlq/${dlqId}`),
+  dismissAllDlq: (id) => req('DELETE', `/jobs/${id}/dlq`),
+  getJobIndexes: (id) => req('GET', `/jobs/${id}/indexes`),
 
   // Pipeline partitions & reconciliation
   getPartitions: (id) => req('GET', `/pipelines/${id}/partitions`),
@@ -82,7 +86,6 @@ export const api = {
 
   // Metrics & health (no auth required on the backend, but we pass token anyway)
   getMetrics: () => req('GET', '/metrics'),
-  getDlq: (id, limit = 100) => req('GET', `/pipelines/${id}/dlq?limit=${limit}`),
   retryDlq: (id) => req('POST', `/pipelines/${id}/dlq/retry`),
   clearDlq: (id) => req('DELETE', `/pipelines/${id}/dlq`),
 };
