@@ -149,12 +149,11 @@ function ProgressBar({ value, max }) {
 
 // ── Metrics header bar ────────────────────────────────────────────────────────
 
-function MetricsBar({ metrics }) {
+function MetricsBar({ metrics, chUncompressedTotal }) {
   if (!metrics) return null;
   const eps = metrics.ingestion?.last_60s?.events_per_sec ?? 0;
   const eps5 = metrics.ingestion?.last_5s?.events_per_sec ?? 0;
   const totalToday = metrics.pipelines?.rows_inserted_today ?? 0;
-  const bytesProcessed = metrics.pipelines?.bytes_processed_total ?? 0;
   // rows_dlq_total = cumulative DLQ counter from pipeline_status (resets with Reset Stats)
   // dlq.pending = actual rows in pipeline_dlq table waiting retry
   const dlqPending = metrics.dlq?.pending ?? 0;
@@ -184,8 +183,8 @@ function MetricsBar({ metrics }) {
           <HardDrive size={13} className="text-slate-500" />
           <span className="text-xs text-slate-500">Data processed</span>
         </div>
-        <div className="text-xl font-bold text-white tabular-nums">{fmtBytes(bytesProcessed)}</div>
-        <div className="text-xs text-slate-600 mt-0.5">cumulative total</div>
+        <div className="text-xl font-bold text-white tabular-nums">{fmtBytes(chUncompressedTotal ?? 0)}</div>
+        <div className="text-xs text-slate-600 mt-0.5">uncompressed in ClickHouse</div>
       </div>
       <div className={`bg-slate-900 border rounded-xl px-4 py-3 ${dlqPending > 0 ? 'border-amber-800/60' : 'border-slate-800'}`}>
         <div className="flex items-center gap-2 mb-1">
@@ -607,6 +606,7 @@ export default function Pipelines() {
   const [partitions, setPartitions] = useState({});
   const [reconcileResult, setReconcileResult] = useState({});
   const [reconcilingId, setReconcilingId] = useState(null);
+  const [chUncompressedTotal, setChUncompressedTotal] = useState(null);
 
   const eps = metrics?.ingestion?.last_60s?.events_per_sec ?? 0;
 
@@ -621,13 +621,24 @@ export default function Pipelines() {
     try { setMetrics(await api.getMetrics()); } catch {}
   }, []);
 
+  const loadChTotal = useCallback(async () => {
+    try {
+      const pipelines = await api.getPipelines();
+      const results = await Promise.allSettled(pipelines.map(p => api.getChStats(p.id)));
+      const total = results.reduce((sum, r) => sum + (r.status === 'fulfilled' ? (r.value?.uncompressed_bytes ?? 0) : 0), 0);
+      setChUncompressedTotal(total);
+    } catch {}
+  }, []);
+
   useEffect(() => {
     load();
     loadMetrics();
+    loadChTotal();
     const t1 = setInterval(load, 8000);
     const t2 = setInterval(loadMetrics, 5000);
-    return () => { clearInterval(t1); clearInterval(t2); };
-  }, [load, loadMetrics]);
+    const t3 = setInterval(loadChTotal, 30000);
+    return () => { clearInterval(t1); clearInterval(t2); clearInterval(t3); };
+  }, [load, loadMetrics, loadChTotal]);
 
   async function action(fn, id) {
     setActing(a => ({ ...a, [id]: true }));
@@ -774,7 +785,7 @@ export default function Pipelines() {
       </div>
 
       {/* Metrics cards */}
-      <MetricsBar metrics={metrics} />
+      <MetricsBar metrics={metrics} chUncompressedTotal={chUncompressedTotal} />
 
       {/* Run result banner */}
       {result && (
