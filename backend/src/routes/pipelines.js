@@ -19,6 +19,7 @@ const PIPELINE_FIELDS = `
   p.batch_mode, p.batch_size, p.batch_timeout_ms,
   p.dedup_enabled, p.dedup_field, p.dedup_algo,
   p.poll_interval_secs, p.retry_count, p.pause_on_fail, p.timestamp_field,
+  p.excluded_fields,
   p.created_at, p.updated_at,
   ps.status as run_status, ps.last_run_at, ps.last_success_at, ps.last_error,
   ps.rows_inserted_total, ps.rows_inserted_today, ps.rows_inserted_week,
@@ -69,8 +70,8 @@ router.post('/', (req, res) => {
       customer_source, customer_value, product_source, product_value,
       batch_mode, batch_size, batch_timeout_ms,
       dedup_enabled, dedup_field, dedup_algo,
-      poll_interval_secs, retry_count, pause_on_fail, timestamp_field
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      poll_interval_secs, retry_count, pause_on_fail, timestamp_field, excluded_fields
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).run(
     p.name, p.description || '', 'paused',
     p.opensearch_connection_id || null, p.index_pattern || '', JSON.stringify(p.index_set_filter || []),
@@ -82,7 +83,8 @@ router.post('/', (req, res) => {
     p.batch_mode || 'both', p.batch_size || 2000, p.batch_timeout_ms || 5000,
     p.dedup_enabled !== false ? 1 : 0, p.dedup_field || 'raw_data', p.dedup_algo || 'md5',
     p.poll_interval_secs || 30, p.retry_count || 3, p.pause_on_fail !== false ? 1 : 0,
-    p.timestamp_field || '@timestamp'
+    p.timestamp_field || '@timestamp',
+    JSON.stringify(p.excluded_fields || [])
   );
 
   // Create initial status row
@@ -106,7 +108,7 @@ router.put('/:id', (req, res) => {
       customer_source=?, customer_value=?, product_source=?, product_value=?,
       batch_mode=?, batch_size=?, batch_timeout_ms=?,
       dedup_enabled=?, dedup_field=?, dedup_algo=?,
-      poll_interval_secs=?, retry_count=?, pause_on_fail=?, timestamp_field=?,
+      poll_interval_secs=?, retry_count=?, pause_on_fail=?, timestamp_field=?, excluded_fields=?,
       updated_at=datetime('now')
     WHERE id=?
   `).run(
@@ -120,6 +122,7 @@ router.put('/:id', (req, res) => {
     p.dedup_enabled ? 1 : 0, p.dedup_field, p.dedup_algo,
     p.poll_interval_secs, p.retry_count, p.pause_on_fail ? 1 : 0,
     p.timestamp_field || '@timestamp',
+    JSON.stringify(typeof p.excluded_fields === 'string' ? JSON.parse(p.excluded_fields) : p.excluded_fields || []),
     req.params.id
   );
   audit.info('pipeline', `Pipeline updated: "${p.name}"`, parseInt(req.params.id));
@@ -455,6 +458,7 @@ router.delete('/:id/dlq/:dlqId', (req, res) => {
 function parsePipeline(row) {
   try { row.field_mappings = JSON.parse(row.field_mappings || '[]'); } catch { row.field_mappings = []; }
   try { row.index_set_filter = JSON.parse(row.index_set_filter || '[]'); } catch { row.index_set_filter = []; }
+  try { row.excluded_fields = JSON.parse(row.excluded_fields || '[]'); } catch { row.excluded_fields = []; }
   return row;
 }
 

@@ -39,6 +39,7 @@ export const api = {
   discoverIndexes: (id, pattern) => req('GET', `/connections/${id}/discover?pattern=${encodeURIComponent(pattern || '')}`),
   getTimestamps: (id, index_pattern) => req('POST', `/connections/${id}/timestamps`, { index_pattern }),
   sampleDocs: (id, index_pattern, size = 3) => req('POST', `/connections/${id}/sample`, { index_pattern, size }),
+  getSampleFields: (id, index_pattern) => req('GET', `/connections/${id}/sample-fields?index_pattern=${encodeURIComponent(index_pattern)}`),
 
   // ClickHouse clusters
   getClusters: () => req('GET', '/clusters'),

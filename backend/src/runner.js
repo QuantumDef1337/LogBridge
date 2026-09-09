@@ -172,7 +172,18 @@ function transformDoc(doc, pipeline) {
     switch (m.source_type) {
       case 'field':    val = getNested(doc, m.source_value); break;
       case 'static':   val = m.source_value; break;
-      case 'full_doc': val = JSON.stringify(doc); break;
+      case 'full_doc': {
+        const excluded = new Set(
+          Array.isArray(pipeline.excluded_fields) ? pipeline.excluded_fields : []
+        );
+        if (excluded.size > 0) {
+          const filtered = Object.fromEntries(Object.entries(doc).filter(([k]) => !excluded.has(k)));
+          val = JSON.stringify(filtered);
+        } else {
+          val = JSON.stringify(doc);
+        }
+        break;
+      }
       case 'now':      val = new Date().toISOString(); break;
       case 'md5':      val = hash('md5', String(getNested(doc, m.source_value) ?? '')); break;
       default:         val = null;

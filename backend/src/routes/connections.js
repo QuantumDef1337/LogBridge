@@ -130,6 +130,34 @@ router.post('/:id/sample', async (req, res) => {
   }
 });
 
+// Return the top-level fields of a sample document (and sub-fields of any JSON-string "message").
+// Used by the Field Exclusions UI to show what fields can be stripped from raw_data.
+router.get('/:id/sample-fields', async (req, res) => {
+  const row = getDb().prepare('SELECT * FROM opensearch_connections WHERE id=?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  const index_pattern = (req.query.index_pattern || '').trim();
+  if (!index_pattern) return res.status(400).json({ error: 'index_pattern required' });
+  try {
+    const docs = await os.sampleDocs(decryptRow(row), index_pattern, 1);
+    if (!docs.length) return res.json({ fields: [] });
+    const doc = docs[0];
+    const topLevel = Object.keys(doc).sort();
+    // If message field is a JSON string, also expose its sub-keys prefixed with "message."
+    let messageSubFields = [];
+    if (typeof doc.message === 'string') {
+      try {
+        const parsed = JSON.parse(doc.message);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          messageSubFields = Object.keys(parsed).map(k => `message.${k}`).sort();
+        }
+      } catch {}
+    }
+    res.json({ fields: [...topLevel, ...messageSubFields] });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 function flattenKeys(obj, prefix, result) {
   if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) {
     result.add(prefix);

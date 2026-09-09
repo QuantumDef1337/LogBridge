@@ -328,6 +328,7 @@ function pauseWithError(db, pipelineId, statusMsg, logMsg) {
 function parsePipeline(row) {
   try { row.field_mappings = JSON.parse(row.field_mappings || '[]'); } catch { row.field_mappings = []; }
   try { row.index_set_filter = JSON.parse(row.index_set_filter || '[]'); } catch { row.index_set_filter = []; }
+  try { row.excluded_fields = JSON.parse(row.excluded_fields || '[]'); } catch { row.excluded_fields = []; }
   return row;
 }
 

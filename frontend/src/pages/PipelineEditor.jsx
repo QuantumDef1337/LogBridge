@@ -17,6 +17,7 @@ const DEFAULT = {
   dedup_enabled: true, dedup_field: 'raw_data', dedup_algo: 'md5',
   poll_interval_secs: 30, retry_count: 3, pause_on_fail: true,
   timestamp_field: '@timestamp',
+  excluded_fields: [],
 };
 
 export default function PipelineEditor() {
@@ -47,6 +48,11 @@ export default function PipelineEditor() {
   const [sampleFields, setSampleFields] = useState([]);
   const [sampleDocs, setSampleDocs] = useState([]);
   const [sampling, setSampling] = useState(false);
+
+  // Field exclusion step state
+  const [availableFields, setAvailableFields] = useState([]);
+  const [fieldsLoading, setFieldsLoading] = useState(false);
+  const [fieldsError, setFieldsError] = useState('');
 
   useEffect(() => {
     api.getConnections().then(setConnections);
@@ -216,6 +222,44 @@ export default function PipelineEditor() {
 
   function removeMapping(idx) {
     setForm(f => ({ ...f, field_mappings: f.field_mappings.filter((_, i) => i !== idx) }));
+  }
+
+  async function loadAvailableFields() {
+    if (!form.opensearch_connection_id || !form.index_pattern) {
+      setFieldsError('Select a connection and index pattern first.');
+      return;
+    }
+    setFieldsLoading(true);
+    setFieldsError('');
+    try {
+      const data = await api.getSampleFields(form.opensearch_connection_id, form.index_pattern);
+      setAvailableFields(data.fields || []);
+    } catch (e) {
+      setFieldsError(e.message);
+    } finally {
+      setFieldsLoading(false);
+    }
+  }
+
+  function toggleExcluded(field) {
+    setForm(f => {
+      const current = new Set(f.excluded_fields || []);
+      if (current.has(field)) current.delete(field); else current.add(field);
+      return { ...f, excluded_fields: [...current] };
+    });
+  }
+
+  function selectAllGl2() {
+    setForm(f => {
+      const gl2Fields = availableFields.filter(k => k.startsWith('gl2_'));
+      const current = new Set(f.excluded_fields || []);
+      gl2Fields.forEach(k => current.add(k));
+      return { ...f, excluded_fields: [...current] };
+    });
+  }
+
+  function clearExclusions() {
+    setForm(f => ({ ...f, excluded_fields: [] }));
   }
 
   async function save() {
@@ -710,6 +754,73 @@ export default function PipelineEditor() {
               </div>
             </div>
           </Section>
+
+          <Section title="Field Exclusions">
+            <p className="text-xs text-slate-400 mb-4">
+              Strip unwanted fields from <code className="text-brand-400">raw_data</code> before inserting into ClickHouse.
+              Useful to remove Graylog metadata (gl2_*, streams) that bloat storage without adding value.
+            </p>
+            <div className="flex flex-wrap gap-2 mb-4">
+              <button
+                onClick={loadAvailableFields}
+                disabled={fieldsLoading}
+                className="btn-ghost text-xs flex items-center gap-1.5"
+              >
+                <RefreshCw size={12} className={fieldsLoading ? 'animate-spin' : ''} />
+                {fieldsLoading ? 'Loading…' : 'Fetch fields from sample doc'}
+              </button>
+              {availableFields.some(f => f.startsWith('gl2_')) && (
+                <button onClick={selectAllGl2} className="btn-ghost text-xs">
+                  Select all gl2_*
+                </button>
+              )}
+              {(form.excluded_fields || []).length > 0 && (
+                <button onClick={clearExclusions} className="btn-ghost text-xs text-red-400">
+                  Clear all
+                </button>
+              )}
+            </div>
+            {fieldsError && <p className="text-xs text-red-400 mb-3">{fieldsError}</p>}
+
+            {/* Selected exclusions as tags */}
+            {(form.excluded_fields || []).length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-4">
+                {(form.excluded_fields || []).map(f => (
+                  <span
+                    key={f}
+                    onClick={() => toggleExcluded(f)}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-red-900/40 text-red-300 border border-red-800 cursor-pointer hover:bg-red-900/60"
+                    title="Click to remove"
+                  >
+                    {f} ×
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Checklist of discovered fields */}
+            {availableFields.length > 0 && (
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-1 max-h-64 overflow-y-auto border border-slate-700 rounded-lg p-3 bg-slate-950">
+                {availableFields.map(f => {
+                  const checked = (form.excluded_fields || []).includes(f);
+                  return (
+                    <label key={f} className="flex items-center gap-2 cursor-pointer py-0.5 hover:text-white">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleExcluded(f)}
+                        className="rounded accent-brand-500 shrink-0"
+                      />
+                      <span className={`text-xs font-mono truncate ${checked ? 'text-red-300' : 'text-slate-400'}`}>{f}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            {availableFields.length === 0 && !fieldsLoading && (
+              <p className="text-xs text-slate-500">Click "Fetch fields" to discover available fields from a sample document.</p>
+            )}
+          </Section>
         </div>
       )}
 
@@ -728,6 +839,7 @@ export default function PipelineEditor() {
               <Row label="Batch Mode" value={`${form.batch_mode} (${form.batch_size} events / ${form.batch_timeout_ms}ms)`} />
               <Row label="Dedup" value={form.dedup_enabled ? `${form.dedup_algo.toUpperCase()} of ${form.dedup_field}` : 'Disabled'} />
               <Row label="Poll Interval" value={`${form.poll_interval_secs}s`} />
+              <Row label="Field Exclusions" value={(form.excluded_fields || []).length > 0 ? `${form.excluded_fields.length} field(s) excluded` : 'None'} />
             </div>
           </Section>
           {error && <div className="bg-red-900/30 border border-red-700 text-red-300 text-sm px-4 py-3 rounded-lg">{error}</div>}
