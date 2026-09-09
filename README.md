@@ -13,7 +13,7 @@ Built with Node.js 24, React 18, and SQLite — zero external dependencies for m
   - [Multi-Page Batching](#2-multi-page-batching--graylog-style-accumulation)
   - [Durable Checkpointing](#3-durable-checkpointing--no-data-loss-on-crash)
   - [Per-Index Partitioning](#4-per-index-partitioning--one-cursor-per-daily-index)
-  - [Pull Modes](#5-pull-modes--continuous-vs-date-range)
+  - [Pull Modes](#5-pull-modes--continuous-from-date-date-range-scheduled)
   - [Dead Letter Queue](#6-dead-letter-queue-dlq--nothing-is-silently-dropped)
   - [Deduplication](#7-deduplication--no-duplicate-rows-in-clickhouse)
   - [Circuit Breaker Awareness](#8-circuit-breaker-awareness--opensearch-heap-protection)
@@ -107,19 +107,47 @@ If you use a wildcard pattern (`wazuh-archives-*`) instead of specific indexes, 
 
 ---
 
-### 5. Pull Modes — Continuous vs date range
+### 5. Pull Modes — Continuous, From Date, Date Range, Scheduled
 
-**Continuous mode** (`pull_mode: continuous`):
-- LogBridge tracks a cursor (last timestamp processed)
-- After each batch, it waits `poll_interval_secs` (default: 30 seconds), then checks for new logs
-- It catches up in real time — as Wazuh writes new logs, LogBridge ships them within seconds
-- This is the default mode for ongoing production pipelines
+LogBridge supports four pull modes. Each defines the **time window** the pipeline reads from — and that same window is what the [Reconciliation](#10-reconciliation--verify-nothing-was-missed) and **Check Timestamps** features use to report totals.
 
-**Date range mode** (`pull_mode: date_range`):
-- You specify a `pull_from_date` and `pull_to_date`
-- LogBridge fetches only logs within that window
-- Once it reaches the end date, it stops automatically
-- Use this for **historical backfill** — shipping old archived data into ClickHouse in one go
+**Continuous** (`pull_mode: continuous`):
+- Tracks a cursor (last timestamp processed) and catches up in real time
+- After each batch, waits `poll_interval_secs` (default: 30s), then checks for new logs
+- Default mode for ongoing production pipelines · window = whole index
+
+**From Date** (`pull_mode: from_date`):
+- You specify `pull_from_date`; LogBridge ships everything from that date up to now
+- Window = `[from → now]` · use for "catch me up from date X"
+
+**Date Range** (`pull_mode: date_range`):
+- You specify `pull_from_date` and `pull_to_date`
+- Window = `[from → to]`; once it reaches the end date it stops automatically
+- Use this for **historical backfill** — shipping old archived data in one go
+
+**Scheduled (Cron)** (`pull_mode: scheduled`):
+- Runs on a cron expression (`schedule_cron`), each trigger pulling a rolling
+  `schedule_lookback_hours` window ending at trigger time
+- A **cursor (`cursor_timestamp`)** records the end of the last successful run, so the next
+  run starts exactly where the last one ended — **no gaps even if the cron fires late**
+- The cursor is only advanced after a run completes successfully (see the data-safety note below)
+
+**Parallel Workers** (`parallel_slices`, all backfill modes): the configured time window is split
+into N equal sub-windows, each scrolled concurrently by its own worker. This works for any index
+regardless of shard count.
+
+> ⚠️ **Scroll-context limit:** each worker opens one OpenSearch scroll context *per shard*. Index
+> patterns spanning many daily indices (hundreds of shards) can exceed the server's
+> `search.max_open_scroll_context` limit (default 500), especially with multiple workers. If you hit
+> `Trying to create too many scroll contexts`, reduce `parallel_slices`, narrow the index pattern, or
+> raise the server limit. A PIT-based backfill (one context per search instead of per shard) is the
+> planned fix.
+
+**Data-safety guarantee:** a scroll that returns a partial result (`timed_out`, shard failures, or
+fewer docs than OpenSearch reported) now **aborts loudly instead of being treated as "done."** The
+cursor is *not* advanced on a failed run, so a partial fetch can never be silently recorded as
+complete — the run re-pulls the missing window next time. Combined with `event_id` [deduplication](#7-deduplication--no-duplicate-rows-in-clickhouse),
+this gives no-gap **and** no-duplicate ingestion.
 
 You can switch modes at any time by editing the pipeline. The cursor is preserved unless you explicitly reset it.
 
@@ -194,18 +222,34 @@ You can configure the retry count per pipeline (0 = no retries, fail immediately
 
 ### 10. Reconciliation — Verify nothing was missed
 
-Reconciliation compares the number of documents in OpenSearch against the number of rows in ClickHouse for the same index and time range.
+Reconciliation is a fairness check between the **source** (OpenSearch / Wazuh indexer) and the
+**destination** (ClickHouse): *did everything that should have been copied actually make it across?*
 
-**How to use it:**
-1. Go to a pipeline's detail page
-2. Click "Reconcile"
-3. Optionally specify a date range to scope the comparison
-4. LogBridge queries OpenSearch for the count and ClickHouse for the count
-5. It reports `MATCH`, `MISMATCH`, or `INCONCLUSIVE` per index
+It is **mode-aware** — it compares only the window the pipeline was configured to pull, and only the
+selected indexes, so the comparison is always apples-to-apples:
 
-**What MISMATCH means:** More documents in OpenSearch than ClickHouse = some logs may not have been shipped yet (pipeline is still catching up) or were lost. Fewer in OpenSearch = documents may have been deleted from the source (normal for index rotation).
+| Pull mode | Window compared |
+|---|---|
+| Date Range | `[from → to]` |
+| From Date | `[from → now]` |
+| Continuous / Scheduled | whole index (no fixed window) |
 
-Use reconciliation after a historical backfill or after a crash recovery to confirm completeness.
+If specific physical indexes are selected on the pipeline, the source count is scoped to those; otherwise the index pattern is used.
+
+**What it reports** (auto-refreshes every 30s on the pipeline card, or click ↻ to run now):
+
+- **Source (OpenSearch)** — exact document count in the window (uses `track_total_hits`, so it is not capped at 10,000)
+- **Ingested (ClickHouse)** — rows present in ClickHouse for the same window
+- **Remaining** — `Source − Ingested` = docs still to ingest, with a **% ingested** progress figure
+- **Source span / Ingested span** — the oldest → newest timestamp actually present on each side, so you can see *where* a gap is (e.g. if the ingested tail stops earlier than the source)
+- **Verdict** — `COMPLETE` when the counts match, `PARTIAL` when ClickHouse is behind
+
+Each side is fetched with a single query that returns count + oldest + newest together (an OpenSearch
+`size:0` search with min/max aggregations; a ClickHouse `count()/min()/max()`).
+
+**What PARTIAL means:** more documents in the source than in ClickHouse = logs still to ship (pipeline
+catching up, or a run aborted). Use reconciliation after a historical backfill or crash recovery to
+confirm completeness, and to watch backfill progress in real time.
 
 ---
 

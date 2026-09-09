@@ -83,6 +83,19 @@ async function countRows(cluster, database, table, whereClause = '') {
   return Number(res.data?.[0]?.c ?? 0);
 }
 
+// Range-scoped stats for reconciliation: exact row count plus oldest/newest value of
+// the timestamp column, all in one query. whereClause is already-built SQL (may be '').
+async function getRangeStats(cluster, database, table, whereClause = '', tsCol = 'timestamp') {
+  const where = whereClause ? ' WHERE ' + whereClause : '';
+  const sql = `SELECT count() AS c, min(\`${tsCol}\`) AS oldest, max(\`${tsCol}\`) AS newest FROM \`${database}\`.\`${table}\`${where}`;
+  const res = await query(cluster, sql);
+  const row = res.data?.[0] || {};
+  const count = Number(row.c ?? 0);
+  // min/max on an empty set return the DateTime epoch — null those out.
+  const clean = (v) => (count > 0 && v && !String(v).startsWith('1970-01-01')) ? v : null;
+  return { count, oldest_ts: clean(row.oldest), newest_ts: clean(row.newest) };
+}
+
 // Check which event_ids from a batch already exist in ClickHouse (for dedup).
 // Returns [] if the column doesn't exist or the query fails — caller falls through.
 async function getExistingEventIds(cluster, database, table, eventIds) {
@@ -97,4 +110,4 @@ async function getExistingEventIds(cluster, database, table, eventIds) {
   }
 }
 
-module.exports = { testConnection, listDatabases, listTables, listColumns, insertRows, query, exec, countRows, getExistingEventIds };
+module.exports = { testConnection, listDatabases, listTables, listColumns, insertRows, query, exec, countRows, getRangeStats, getExistingEventIds };

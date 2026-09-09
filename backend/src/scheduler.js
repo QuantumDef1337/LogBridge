@@ -203,6 +203,51 @@ async function runLoop(pipelineId, token) {
 
     let result;
     try {
+      if (pipeline.pull_mode === 'date_range' && (pipeline.parallel_slices || 1) > 1) {
+        // date_range + parallel workers: split the full date range across N time-window workers.
+        // Covers the entire range in one parallel run, then auto-pauses. Sequential PIT is used
+        // when parallel_slices=1 (handled in the normal path below).
+        const from = new Date(pipeline.pull_from_date);
+        const to   = pipeline.pull_to_date ? new Date(pipeline.pull_to_date) : new Date();
+        if (isNaN(from.getTime())) {
+          pauseWithError(db, pipelineId, 'date_range: invalid pull_from_date');
+          break;
+        }
+        result = await runner.runScheduledSlices(conn, cluster, pipeline, { forceFrom: from, to, cancelToken: token });
+        if (!token.cancelled && !shuttingDown) {
+          db.prepare("UPDATE pipelines SET status='paused', updated_at=datetime('now') WHERE id=?").run(pipelineId);
+          db.prepare("UPDATE pipeline_status SET status='idle', last_success_at=datetime('now'), last_error=NULL WHERE pipeline_id=?").run(pipelineId);
+          db.prepare("INSERT INTO pipeline_logs (pipeline_id, level, message) VALUES (?, 'info', ?)")
+            .run(pipelineId, `Parallel backfill complete — fetched ${result.fetched}, inserted ${result.inserted}, skipped ${result.skipped} (dedup), dlq ${result.dlq}`);
+        }
+        break;
+      }
+
+      if (pipeline.pull_mode === 'scheduled') {
+        // Scheduled mode: runScheduledSlices computes the window itself (cursor → now).
+        const cronExpr = (pipeline.schedule_cron || '0 0 * * *').trim();
+        result = await runner.runScheduledSlices(conn, cluster, pipeline, { cancelToken: token });
+
+        // After a successful run, sleep until the next cron fire time.
+        if (!token.cancelled && !shuttingDown) {
+          let nextFire;
+          try { nextFire = nextCronRun(cronExpr, new Date()); } catch (e) { nextFire = null; }
+          if (nextFire) {
+            const sleepMs = Math.max(0, nextFire.getTime() - Date.now());
+            db.prepare("UPDATE pipeline_status SET status='idle', last_success_at=datetime('now'), last_error=NULL WHERE pipeline_id=?").run(pipelineId);
+            db.prepare("INSERT INTO pipeline_logs (pipeline_id, level, message) VALUES (?, 'info', ?)")
+              .run(pipelineId, `Next scheduled run at: ${nextFire.toISOString()} (in ${Math.round(sleepMs / 60000)}m)`);
+            nextRunAt.set(pipelineId, nextFire.getTime());
+            const ok = await cancellableSleep(sleepMs, token);
+            nextRunAt.delete(pipelineId);
+            if (!ok) break;
+            consecutiveErrors = 0;
+            continue; // re-enter loop to run next window
+          }
+        }
+        break; // no valid cron or cancelled — stop
+      }
+
       const physicalIndexes = pipeline.index_set_filter; // already parsed array
 
       if (physicalIndexes && physicalIndexes.length > 0) {
@@ -301,14 +346,13 @@ async function runLoop(pipelineId, token) {
     // If not caught up, loop immediately — more pages available
   }
 
-  // Ensure status is not stuck as 'running'
+  // Always reset run_status when the loop exits — regardless of whether the pipeline
+  // was paused or cancelled. The old guard (checking pipelines.status='active') caused
+  // pipeline_status.status to stay stuck at 'running' after a pause.
   try {
-    const row = db.prepare("SELECT status FROM pipelines WHERE id=?").get(pipelineId);
-    if (row?.status === 'active') {
-      db.prepare(
-        "UPDATE pipeline_status SET status='idle' WHERE pipeline_id=? AND status='running'"
-      ).run(pipelineId);
-    }
+    db.prepare(
+      "UPDATE pipeline_status SET status='idle' WHERE pipeline_id=? AND status='running'"
+    ).run(pipelineId);
   } catch {}
 }
 
@@ -329,7 +373,97 @@ function parsePipeline(row) {
   try { row.field_mappings = JSON.parse(row.field_mappings || '[]'); } catch { row.field_mappings = []; }
   try { row.index_set_filter = JSON.parse(row.index_set_filter || '[]'); } catch { row.index_set_filter = []; }
   try { row.excluded_fields = JSON.parse(row.excluded_fields || '[]'); } catch { row.excluded_fields = []; }
+  row.schedule_lookback_hours = row.schedule_lookback_hours || 24;
+  row.parallel_slices = Math.max(1, Math.min(row.parallel_slices || 1, 10));
   return row;
+}
+
+// ── Minimal 5-field cron parser ───────────────────────────────────────────────
+// Supported syntax per field: *, n, n-m, */n, n/n, comma-separated combinations.
+
+function parseCronField(field, min, max) {
+  const values = new Set();
+  for (const part of field.split(',')) {
+    if (part === '*') {
+      for (let i = min; i <= max; i++) values.add(i);
+    } else if (part.includes('/')) {
+      const [rangeStr, stepStr] = part.split('/');
+      const step = parseInt(stepStr);
+      let start = min, end = max;
+      if (rangeStr !== '*') {
+        if (rangeStr.includes('-')) {
+          [start, end] = rangeStr.split('-').map(Number);
+        } else {
+          start = parseInt(rangeStr);
+        }
+      }
+      for (let i = start; i <= max && i <= end; i += step) values.add(i);
+    } else if (part.includes('-')) {
+      const [s, e] = part.split('-').map(Number);
+      for (let i = s; i <= e; i++) values.add(i);
+    } else {
+      const n = parseInt(part);
+      if (!isNaN(n)) values.add(n);
+    }
+  }
+  return [...values].sort((a, b) => a - b);
+}
+
+/**
+ * Return the next Date at or after `from + 1 minute` that satisfies the cron expression.
+ * Cron format: min hour dom month dow (5 fields, local time).
+ */
+function nextCronRun(expr, from) {
+  const fields = expr.trim().split(/\s+/);
+  if (fields.length !== 5) throw new Error(`Invalid cron expression (need 5 fields): ${expr}`);
+  const [mF, hF, domF, monF, dowF] = fields;
+
+  const mins = parseCronField(mF, 0, 59);
+  const hrs  = parseCronField(hF, 0, 23);
+  const doms = parseCronField(domF, 1, 31);
+  const mons = parseCronField(monF, 1, 12);
+  // 7 = Sunday (alias for 0)
+  const dowRaw = parseCronField(dowF, 0, 7);
+  const dows = [...new Set(dowRaw.map(d => d === 7 ? 0 : d))];
+
+  const d = new Date(from.getTime());
+  d.setSeconds(0, 0);
+  d.setMinutes(d.getMinutes() + 1); // advance past the current minute
+
+  const limit = new Date(from.getTime() + 366 * 86400000);
+
+  while (d <= limit) {
+    const mon = d.getMonth() + 1; // JS months are 0-based
+    if (!mons.includes(mon)) {
+      d.setDate(1); d.setHours(0, 0, 0, 0); d.setMonth(d.getMonth() + 1); continue;
+    }
+
+    const dom = d.getDate();
+    const dow = d.getDay();
+    const domStar = domF === '*';
+    const dowStar = dowF === '*';
+    let dayOk;
+    if (domStar && dowStar)       dayOk = true;
+    else if (!domStar && !dowStar) dayOk = doms.includes(dom) || dows.includes(dow);
+    else if (domStar)              dayOk = dows.includes(dow);
+    else                           dayOk = doms.includes(dom);
+
+    if (!dayOk) { d.setDate(d.getDate() + 1); d.setHours(0, 0, 0, 0); continue; }
+
+    const hr = d.getHours();
+    const nextHr = hrs.find(h => h >= hr);
+    if (nextHr === undefined) { d.setDate(d.getDate() + 1); d.setHours(0, 0, 0, 0); continue; }
+    if (nextHr > hr) { d.setHours(nextHr, 0, 0, 0); }
+
+    const mn = d.getMinutes();
+    const nextMn = mins.find(m => m >= mn);
+    if (nextMn === undefined) { d.setHours(d.getHours() + 1, 0, 0, 0); continue; }
+
+    d.setMinutes(nextMn, 0, 0);
+    return d;
+  }
+
+  throw new Error(`nextCronRun: no match within 366 days for cron: ${expr}`);
 }
 
 /** Sleep for `ms` milliseconds. Returns true if completed, false if cancelled. */

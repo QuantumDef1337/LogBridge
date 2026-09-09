@@ -5,6 +5,48 @@ import { api } from '../api';
 
 const STEPS = ['Source', 'Destination', 'Field Mapping', 'Tagging & Batching', 'Review'];
 
+// ── Schedule presets ──────────────────────────────────────────────────────────
+const SCHEDULE_PRESETS = [
+  {
+    id: 'daily',
+    label: 'Daily at midnight — pull full previous day',
+    fireTimes: 'Fires once a day at 12:00 AM (midnight)',
+    example: 'Sep 10 at 12:00 AM  →  pulls Sep 9 00:00 AM to Sep 10 00:00 AM (full previous day)',
+    cron: '0 0 * * *',
+    lookback: 24,
+  },
+  {
+    id: 'every6h',
+    label: 'Every 6 hours — pull previous 6 hours',
+    fireTimes: 'Fires 4× per day at 12:00 AM, 06:00 AM, 12:00 PM, 06:00 PM',
+    example: 'Sep 10 at 06:00 AM  →  pulls Sep 10 12:00 AM to 06:00 AM (6-hour window)',
+    cron: '0 */6 * * *',
+    lookback: 6,
+  },
+  {
+    id: 'hourly',
+    label: 'Every hour — pull previous hour',
+    fireTimes: 'Fires 24× per day at the top of every hour (01:00, 02:00 … 24:00)',
+    example: 'Sep 10 at 03:00 AM  →  pulls Sep 10 02:00 AM to 03:00 AM (1-hour window)',
+    cron: '0 * * * *',
+    lookback: 1,
+  },
+  {
+    id: 'weekly',
+    label: 'Weekly on Sunday midnight — pull previous 7 days',
+    fireTimes: 'Fires once a week on Sunday at 12:00 AM (midnight)',
+    example: 'Sep 13 (Sunday) at 12:00 AM  →  pulls Sep 6 to Sep 13 (7-day window)',
+    cron: '0 0 * * 0',
+    lookback: 168,
+  },
+];
+
+function scheduleExample(cron, lookback) {
+  const p = SCHEDULE_PRESETS.find(p => p.cron === cron && p.lookback === lookback);
+  if (p) return p.example;
+  return `At each trigger, pulls the ${lookback}h window ending at trigger time`;
+}
+
 const DEFAULT = {
   name: '', description: '', status: 'paused',
   opensearch_connection_id: '', index_pattern: '', index_set_filter: [],
@@ -18,6 +60,9 @@ const DEFAULT = {
   poll_interval_secs: 30, retry_count: 3, pause_on_fail: true,
   timestamp_field: '@timestamp',
   excluded_fields: [],
+  schedule_cron: '0 0 * * *',
+  schedule_lookback_hours: 24,
+  parallel_slices: 1,
 };
 
 export default function PipelineEditor() {
@@ -54,6 +99,27 @@ export default function PipelineEditor() {
   const [fieldsLoading, setFieldsLoading] = useState(false);
   const [fieldsError, setFieldsError] = useState('');
 
+  // Schedule mode: 'preset' uses a quick-pick, 'custom' reveals cron+hours fields
+  const [scheduleMode, setScheduleMode] = useState('preset');
+
+  // Run Now (scheduled pipelines)
+  const [runningNow, setRunningNow] = useState(false);
+  const [runNowResult, setRunNowResult] = useState(null);
+
+  async function handleRunNow() {
+    if (!id || runningNow) return;
+    setRunningNow(true);
+    setRunNowResult(null);
+    try {
+      const r = await api.runNow(id);
+      setRunNowResult({ ok: true, fetched: r.fetched, inserted: r.inserted, skipped: r.skipped, dlq: r.dlq });
+    } catch (e) {
+      setRunNowResult({ ok: false, error: e.message });
+    } finally {
+      setRunningNow(false);
+    }
+  }
+
   useEffect(() => {
     api.getConnections().then(setConnections);
     api.getClusters().then(setClusters);
@@ -61,6 +127,9 @@ export default function PipelineEditor() {
     if (id) {
       api.getPipeline(id).then(async p => {
         setForm({ ...DEFAULT, ...p });
+        // Restore schedule mode: if saved values match no preset, show custom fields
+        const matchesPreset = SCHEDULE_PRESETS.some(pr => pr.cron === (p.schedule_cron || DEFAULT.schedule_cron) && pr.lookback === (p.schedule_lookback_hours || DEFAULT.schedule_lookback_hours));
+        setScheduleMode(matchesPreset ? 'preset' : 'custom');
 
         // Pre-load connection indices so the index hints populate
         if (p.opensearch_connection_id) {
@@ -140,13 +209,26 @@ export default function PipelineEditor() {
     setForm(f => ({ ...f, index_set_filter: [] }));
   }
 
-  // Load timestamps for pattern
+  // Load timestamps scoped to the selected pull-mode timeframe and selected indexes.
   async function loadTs() {
     if (!form.opensearch_connection_id || !form.index_pattern) return;
     setTsLoading(true);
     setTsInfo(null);
     try {
-      const info = await api.getTimestamps(form.opensearch_connection_id, form.index_pattern);
+      // Mode-aware window: date_range → [from,to]; from_date → [from,now];
+      // continuous/scheduled → whole index (no bound).
+      const opts = {};
+      if (form.pull_mode === 'date_range') {
+        if (form.pull_from_date) opts.from = form.pull_from_date;
+        if (form.pull_to_date) opts.to = form.pull_to_date;
+      } else if (form.pull_mode === 'from_date') {
+        if (form.pull_from_date) opts.from = form.pull_from_date;
+      }
+      if (Array.isArray(form.index_set_filter) && form.index_set_filter.length) {
+        opts.indexes = form.index_set_filter;
+      }
+      if (form.timestamp_field) opts.timestamp_field = form.timestamp_field;
+      const info = await api.getTimestamps(form.opensearch_connection_id, form.index_pattern, opts);
       setTsInfo(info);
     } catch (e) {
       setTsInfo({ error: e.message });
@@ -429,9 +511,10 @@ export default function PipelineEditor() {
           <Section title="Pull Mode">
             <div className="space-y-3">
               {[
-                ['continuous', 'Continuous', 'Pull new logs as they arrive (live ingestion)'],
-                ['from_date',  'From Date',  'Backfill from a specific date until now'],
-                ['date_range', 'Date Range', 'Pull logs between two specific dates (backfill only)'],
+                ['continuous', 'Continuous',       'Pull new logs as they arrive (live ingestion)'],
+                ['from_date',  'From Date',         'Backfill from a specific date until now'],
+                ['date_range', 'Date Range',        'Pull logs between two specific dates (backfill only)'],
+                ['scheduled',  'Scheduled (Cron)',  'Pull on a cron schedule — auto-computes a rolling time window at each trigger'],
               ].map(([val, label, desc]) => (
                 <label key={val} className="flex items-start gap-3 cursor-pointer">
                   <input type="radio" name="pull_mode" value={val} checked={form.pull_mode === val}
@@ -442,18 +525,189 @@ export default function PipelineEditor() {
                   </div>
                 </label>
               ))}
+
               {(form.pull_mode === 'from_date' || form.pull_mode === 'date_range') && (
-                <div className="grid grid-cols-2 gap-4 mt-2 pl-6">
-                  <div>
-                    <label className="label">From</label>
-                    <input type="datetime-local" className="input w-full" value={form.pull_from_date}
-                      onChange={e => set('pull_from_date', e.target.value)} />
-                  </div>
-                  {form.pull_mode === 'date_range' && (
+                <div className="mt-2 pl-6 space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="label">To</label>
-                      <input type="datetime-local" className="input w-full" value={form.pull_to_date}
-                        onChange={e => set('pull_to_date', e.target.value)} />
+                      <label className="label">From</label>
+                      <input type="datetime-local" className="input w-full" value={form.pull_from_date}
+                        onChange={e => set('pull_from_date', e.target.value)} />
+                    </div>
+                    {form.pull_mode === 'date_range' && (
+                      <div>
+                        <label className="label">To</label>
+                        <input type="datetime-local" className="input w-full" value={form.pull_to_date}
+                          onChange={e => set('pull_to_date', e.target.value)} />
+                      </div>
+                    )}
+                  </div>
+
+                  {form.pull_mode === 'date_range' && (
+                    <div className="border border-slate-700 rounded-lg p-4 space-y-3">
+                      <div>
+                        <label className="label">
+                          Parallel Workers &mdash;{' '}
+                          <span className="text-brand-400">
+                            {form.parallel_slices === 1 ? '1 (sequential)' : `${form.parallel_slices} parallel time windows`}
+                          </span>
+                        </label>
+                        <input type="range" min={1} max={10} value={form.parallel_slices}
+                          onChange={e => set('parallel_slices', +e.target.value)}
+                          className="w-full accent-brand-500" />
+                        <div className="flex justify-between text-xs text-slate-500 mt-0.5">
+                          <span>1</span><span>2</span><span>4</span><span>6</span><span>8</span><span>10</span>
+                        </div>
+                      </div>
+                      <p className="text-xs text-slate-500">
+                        Splits the date range into N equal time windows and scrolls them in parallel.
+                        Works for any index — single-shard or multi-shard.{' '}
+                        <strong className="text-slate-400">4 workers on a 30-day range = each worker handles ~7.5 days concurrently.</strong>
+                      </p>
+                      {form.parallel_slices > 1 && (
+                        <div className="text-xs text-amber-400/80 bg-amber-900/10 border border-amber-800/40 rounded px-3 py-2">
+                          Parallel mode pulls the full date range in one shot, then auto-pauses. If interrupted, dedup ensures no duplicates on restart.
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {form.pull_mode === 'scheduled' && (
+                <div className="mt-3 pl-6 space-y-5 border-l-2 border-brand-700">
+
+                  {/* First-run note */}
+                  <div className="text-xs text-amber-400/80 bg-amber-900/10 border border-amber-800/40 rounded-lg px-3 py-2">
+                    First run starts <strong>immediately</strong> when you activate the pipeline, then follows the schedule.
+                  </div>
+
+                  {/* ── Preset picker ── */}
+                  <div className="space-y-2">
+                    {SCHEDULE_PRESETS.map(p => {
+                      const active = scheduleMode === 'preset' && form.schedule_cron === p.cron && form.schedule_lookback_hours === p.lookback;
+                      return (
+                        <label key={p.id}
+                          className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                            active ? 'border-brand-500 bg-brand-900/20' : 'border-slate-700 hover:border-slate-600'
+                          }`}
+                        >
+                          <input type="radio" name="schedule_preset" checked={active}
+                            onChange={() => {
+                              setScheduleMode('preset');
+                              set('schedule_cron', p.cron);
+                              set('schedule_lookback_hours', p.lookback);
+                            }}
+                            className="mt-0.5 flex-shrink-0" />
+                          <div>
+                            <div className="text-sm font-medium text-white">{p.label}</div>
+                            <div className="text-xs text-slate-400 mt-0.5">{p.fireTimes}</div>
+                            <div className="text-xs text-green-400/80 mt-1">
+                              Example: {p.example}
+                            </div>
+                          </div>
+                        </label>
+                      );
+                    })}
+
+                    {/* Custom */}
+                    <div className={`p-3 rounded-lg border transition-colors ${scheduleMode === 'custom' ? 'border-brand-500 bg-brand-900/20' : 'border-slate-700 hover:border-slate-600'}`}>
+                      <label className="flex items-center gap-3 cursor-pointer">
+                        <input type="radio" name="schedule_preset" checked={scheduleMode === 'custom'}
+                          onChange={() => setScheduleMode('custom')}
+                          className="flex-shrink-0" />
+                        <div>
+                          <div className="text-sm font-medium text-white">Custom cron</div>
+                          <div className="text-xs text-slate-400">Set your own cron expression and lookback window</div>
+                        </div>
+                      </label>
+                      {scheduleMode === 'custom' && (
+                        <div className="grid grid-cols-2 gap-3 mt-3 pl-6">
+                          <div>
+                            <label className="label text-xs">Cron Expression</label>
+                            <input className="input w-full font-mono text-sm"
+                              value={form.schedule_cron}
+                              onChange={e => set('schedule_cron', e.target.value)}
+                              placeholder="0 0 * * *" />
+                            <p className="text-xs text-slate-500 mt-1">Format: min&nbsp;hour&nbsp;dom&nbsp;month&nbsp;dow</p>
+                          </div>
+                          <div>
+                            <label className="label text-xs">Lookback (hours)</label>
+                            <input type="number" className="input w-full"
+                              value={form.schedule_lookback_hours}
+                              onChange={e => set('schedule_lookback_hours', Math.max(1, +e.target.value))}
+                              min={1} max={8760} />
+                            <p className="text-xs text-slate-500 mt-1">Hours to pull before each trigger</p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* ── Live preview ── */}
+                  <div className="bg-slate-800/60 border border-slate-700 rounded-lg px-4 py-3 text-xs space-y-1">
+                    <div className="text-slate-400 font-medium mb-1">At each trigger:</div>
+                    <div className="text-white">
+                      Pulls logs from{' '}
+                      <span className="text-brand-400 font-mono">trigger − {form.schedule_lookback_hours}h</span>
+                      {' '}to{' '}
+                      <span className="text-brand-400 font-mono">trigger time</span>
+                    </div>
+                    <div className="text-slate-400 pt-0.5">
+                      {scheduleMode === 'preset'
+                        ? scheduleExample(form.schedule_cron, form.schedule_lookback_hours)
+                        : `Custom: ${form.schedule_cron || '—'} · ${form.schedule_lookback_hours}h lookback`}
+                    </div>
+                  </div>
+
+                  {/* ── Parallel workers ── */}
+                  <div>
+                    <label className="label">
+                      Parallel Workers &mdash;{' '}
+                      <span className="text-brand-400">{form.parallel_slices === 1 ? '1 (sequential)' : `${form.parallel_slices} parallel time windows`}</span>
+                    </label>
+                    <input type="range" min={1} max={10} value={form.parallel_slices}
+                      onChange={e => set('parallel_slices', +e.target.value)}
+                      className="w-full accent-brand-500" />
+                    <div className="flex justify-between text-xs text-slate-500 mt-0.5">
+                      <span>1</span><span>2</span><span>4</span><span>6</span><span>8</span><span>10</span>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-2">
+                      Splits the time window into N equal parts and scrolls each part in parallel.{' '}
+                      <strong className="text-slate-400">Works for any index — single-shard or multi-shard.</strong>{' '}
+                      Use 1 for low volumes; 4–8 for high-volume indexes (&gt;500k docs/day).
+                    </p>
+                  </div>
+
+                  {/* ── Run Now button (only for saved pipelines) ── */}
+                  {id && (
+                    <div className="border-t border-slate-700 pt-4">
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={handleRunNow}
+                          disabled={runningNow}
+                          className="btn-primary flex items-center gap-2 text-sm"
+                        >
+                          {runningNow
+                            ? <><RefreshCw size={14} className="animate-spin" /> Running…</>
+                            : '▶ Run Now'}
+                        </button>
+                        <span className="text-xs text-slate-400">
+                          Trigger an immediate pull using the cursor window (no schedule wait)
+                        </span>
+                      </div>
+                      {runNowResult && (
+                        <div className={`mt-3 px-3 py-2 rounded-lg text-xs border ${
+                          runNowResult.ok
+                            ? 'bg-green-900/20 border-green-700 text-green-300'
+                            : 'bg-red-900/20 border-red-700 text-red-300'
+                        }`}>
+                          {runNowResult.ok
+                            ? `Done — fetched ${runNowResult.fetched}, inserted ${runNowResult.inserted}, skipped ${runNowResult.skipped ?? 0} (dedup), dlq ${runNowResult.dlq ?? 0}`
+                            : `Error: ${runNowResult.error}`}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -832,7 +1086,9 @@ export default function PipelineEditor() {
             <div className="space-y-3 text-sm">
               <Row label="Name" value={form.name} />
               <Row label="Source" value={`${connections.find(c => c.id == form.opensearch_connection_id)?.name || '—'} → ${form.index_pattern}`} />
-              <Row label="Pull Mode" value={form.pull_mode} />
+              <Row label="Pull Mode" value={form.pull_mode === 'scheduled'
+                ? `Scheduled — cron: ${form.schedule_cron}, lookback: ${form.schedule_lookback_hours}h, slices: ${form.parallel_slices}`
+                : form.pull_mode} />
               <Row label="Destination" value={`${clusters.find(c => c.id == form.clickhouse_cluster_id)?.name || '—'} → ${form.clickhouse_database}.${form.clickhouse_table}`} />
               <Row label="Field Mappings" value={`${form.field_mappings.length} columns mapped`} />
               <Row label="Customer" value={`${form.customer_source === 'field' ? 'from field' : 'static'}: ${form.customer_value}`} />

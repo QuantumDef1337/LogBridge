@@ -37,7 +37,7 @@ export const api = {
   testConnection: (id) => req('POST', `/connections/${id}/test`),
   getIndices: (id) => req('GET', `/connections/${id}/indices`),
   discoverIndexes: (id, pattern) => req('GET', `/connections/${id}/discover?pattern=${encodeURIComponent(pattern || '')}`),
-  getTimestamps: (id, index_pattern) => req('POST', `/connections/${id}/timestamps`, { index_pattern }),
+  getTimestamps: (id, index_pattern, opts = {}) => req('POST', `/connections/${id}/timestamps`, { index_pattern, ...opts }),
   sampleDocs: (id, index_pattern, size = 3) => req('POST', `/connections/${id}/sample`, { index_pattern, size }),
   getSampleFields: (id, index_pattern) => req('GET', `/connections/${id}/sample-fields?index_pattern=${encodeURIComponent(index_pattern)}`),
 

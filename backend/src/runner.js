@@ -535,4 +535,167 @@ async function runIndexPartition(conn, cluster, pipeline, indexName, opts = {}) 
   return result;
 }
 
-module.exports = { runPipelineOnce, runIndexPartition, transformDoc, buildRange };
+/**
+ * Run a scheduled pull: fetch all docs in a time window using N parallel sliced scroll workers.
+ *
+ * Window selection (no-gap guarantee):
+ *   - "to"   = now (always)
+ *   - "from" = cursor_timestamp from last successful run  (prevents gaps when cron fires late)
+ *              → falls back to now − lookback_hours on first ever run
+ *   opts.forceFrom overrides the cursor (e.g. for a manual "run now" with a specific window).
+ *
+ * Deduplication via event_id hash prevents duplicate inserts when windows overlap.
+ * cursor_timestamp is only written after ALL slices complete — a partial failure leaves
+ * the cursor at the last good point so the next trigger re-covers the missed range.
+ *
+ * Returns { fetched, inserted, skipped, dlq, from, to }.
+ */
+async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
+  const db = getDb();
+  const sliceMax = Math.max(1, Math.min(pipeline.parallel_slices || 1, 10));
+  const tsField = pipeline.timestamp_field || '@timestamp';
+  const batchSize = Math.min(pipeline.batch_size || 2000, 10000);
+  const retryOpts = {
+    maxAttempts: (pipeline.retry_count || 5) + 1,
+    initialDelayMs: 1000,
+    maxDelayMs: 30000,
+  };
+
+  // ── Compute time window ──────────────────────────────────────────────────────
+  const to = opts.to || new Date();
+  let from;
+  if (opts.forceFrom) {
+    // Manual override (e.g. run-now with an explicit window)
+    from = opts.forceFrom instanceof Date ? opts.forceFrom : new Date(opts.forceFrom);
+  } else {
+    // Use the end of the last successful run as "from" so there are no gaps between runs.
+    // Fall back to now − lookback_hours on the very first run.
+    const lastRun = db.prepare('SELECT cursor_timestamp FROM pipeline_status WHERE pipeline_id=?').get(pipeline.id);
+    const lookbackMs = (pipeline.schedule_lookback_hours || 24) * 3600 * 1000;
+    from = lastRun?.cursor_timestamp
+      ? new Date(lastRun.cursor_timestamp)
+      : new Date(to.getTime() - lookbackMs);
+  }
+
+  // ── Build time sub-windows for parallel workers ─────────────────────────────
+  // Time-window partitioning works regardless of shard count, unlike OpenSearch
+  // slice queries which only help when the index has multiple shards. Each worker
+  // scrolls its own non-overlapping time range concurrently.
+  const windowMs = to.getTime() - from.getTime();
+  const subMs = Math.max(1, Math.floor(windowMs / sliceMax));
+
+  const timeWindows = Array.from({ length: sliceMax }, (_, i) => {
+    const wFrom = new Date(from.getTime() + i * subMs);
+    if (i === sliceMax - 1) {
+      // Last window: inclusive upper bound covering any rounding remainder
+      return { gte: wFrom.toISOString(), lte: to.toISOString() };
+    }
+    // Intermediate windows: exclusive upper bound (lt) avoids boundary duplicates
+    return { gte: wFrom.toISOString(), lt: new Date(from.getTime() + (i + 1) * subMs).toISOString() };
+  });
+
+  pipelineLog(pipeline.id, 'info',
+    `Scheduled pull: ${from.toISOString()} → ${to.toISOString()} · ${sliceMax} time-window worker(s) · batch=${batchSize}`
+  );
+
+  const cancelToken = opts.cancelToken || null; // scheduler passes this for pause support
+
+  // ── Per-worker: scrolls its own time sub-window ──────────────────────────────
+  async function runWorker(workerId, range) {
+    let workerFetched = 0, workerInserted = 0, workerSkipped = 0, workerDlq = 0;
+    let batchRows = [];
+
+    async function flushBatch() {
+      if (!batchRows.length) return;
+      const eventIds = batchRows.map(r => r.event_id).filter(Boolean);
+      let insertRows = batchRows;
+      if (eventIds.length > 0) {
+        const existing = await ch.getExistingEventIds(
+          cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, eventIds
+        );
+        if (existing.length > 0) {
+          const existingSet = new Set(existing);
+          insertRows = batchRows.filter(r => !r.event_id || !existingSet.has(r.event_id));
+          workerSkipped += batchRows.length - insertRows.length;
+        }
+      }
+      if (insertRows.length) {
+        const ndjson = insertRows.map(r => JSON.stringify(r)).join('\n');
+        await withRetry(
+          () => ch.insertRows(cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, ndjson),
+          retryOpts
+        );
+        workerInserted += insertRows.length;
+        metrics.recordIngestion(insertRows.length, Buffer.byteLength(ndjson, 'utf8'));
+        pipelineLog(pipeline.id, 'info',
+          `[worker-${workerId}] Batch inserted: ${insertRows.length} rows (skipped ${workerSkipped} dedup)`
+        );
+      }
+      batchRows = [];
+    }
+
+    // sliceId=0, sliceMax=1 → no shard slice block; full index scanned within the time range.
+    // Throw a sentinel inside onPage when cancelled so the scroll is abandoned immediately
+    // rather than waiting for the full sub-window to complete.
+    const CANCELLED = Symbol('cancelled');
+    try {
+      await os.fetchSlicedWindow(conn, pipeline.index_pattern, 0, 1, batchSize, range, tsField, async (docs) => {
+        if (cancelToken?.cancelled) throw CANCELLED;
+        workerFetched += docs.length;
+        for (const d of docs) {
+          try {
+            batchRows.push(transformDoc(d, pipeline));
+          } catch (e) {
+            toDlq(pipeline.id, [d], { message: e.message, category: 'transform' });
+            workerDlq++;
+          }
+          if (batchRows.length >= batchSize) await flushBatch();
+        }
+      });
+    } catch (e) {
+      if (e !== CANCELLED) throw e; // only swallow the cancellation sentinel
+    }
+
+    await flushBatch();
+    return { fetched: workerFetched, inserted: workerInserted, skipped: workerSkipped, dlq: workerDlq };
+  }
+
+  // ── Run all time-window workers in parallel ───────────────────────────────────
+  const results = await Promise.all(
+    timeWindows.map((range, i) => runWorker(i, range))
+  );
+
+  const totals = results.reduce(
+    (acc, r) => ({ fetched: acc.fetched + r.fetched, inserted: acc.inserted + r.inserted, skipped: acc.skipped + r.skipped, dlq: acc.dlq + r.dlq }),
+    { fetched: 0, inserted: 0, skipped: 0, dlq: 0 }
+  );
+
+  pipelineLog(pipeline.id, 'info',
+    `Scheduled run complete — fetched ${totals.fetched}, inserted ${totals.inserted}, skipped ${totals.skipped} (dedup), dlq ${totals.dlq} · ${sliceMax} worker(s)`
+  );
+
+  // ── Persist checkpoint ONLY after all slices succeed ────────────────────────
+  // Writing cursor_timestamp = to means the next run will start from here — no gaps.
+  // A partial failure (exception above) skips this block, so next trigger re-covers the range.
+  db.prepare(`
+    INSERT INTO pipeline_status
+      (pipeline_id, cursor_timestamp, rows_inserted_total, rows_inserted_today, rows_skipped_dedup, rows_dlq, last_success_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    ON CONFLICT(pipeline_id) DO UPDATE SET
+      cursor_timestamp    = excluded.cursor_timestamp,
+      rows_inserted_total = COALESCE(pipeline_status.rows_inserted_total, 0) + ?,
+      rows_inserted_today = COALESCE(pipeline_status.rows_inserted_today, 0) + ?,
+      rows_skipped_dedup  = COALESCE(pipeline_status.rows_skipped_dedup, 0) + ?,
+      rows_dlq            = COALESCE(pipeline_status.rows_dlq, 0) + ?,
+      last_success_at     = datetime('now'),
+      updated_at          = datetime('now')
+  `).run(
+    pipeline.id, to.toISOString(),
+    totals.inserted, totals.inserted, totals.skipped, totals.dlq,
+    totals.inserted, totals.inserted, totals.skipped, totals.dlq
+  );
+
+  return { ...totals, from, to };
+}
+
+module.exports = { runPipelineOnce, runIndexPartition, runScheduledSlices, transformDoc, buildRange };

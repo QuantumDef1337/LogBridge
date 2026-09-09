@@ -106,10 +106,21 @@ router.get('/:id/discover', async (req, res) => {
 router.post('/:id/timestamps', async (req, res) => {
   const row = getDb().prepare('SELECT * FROM opensearch_connections WHERE id=?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
-  const { index_pattern } = req.body;
+  const { index_pattern, from, to, indexes, timestamp_field } = req.body;
   if (!index_pattern) return res.status(400).json({ error: 'index_pattern required' });
+
+  // Scope to the physically-selected indexes if provided, else the pattern.
+  const target = Array.isArray(indexes) && indexes.length ? indexes.join(',') : index_pattern;
+  const range = {};
+  if (from) range.gte = from;
+  if (to) range.lte = to;
+  const tsField = timestamp_field || '@timestamp';
+
   try {
-    res.json(await os.getIndexTimestamps(decryptRow(row), index_pattern));
+    // getRangeStats returns { count, oldest_ts, newest_ts } scoped to range + indexes.
+    // Map to the shape the editor already renders (doc_count / oldest_ts / newest_ts).
+    const stats = await os.getRangeStats(decryptRow(row), target, range, tsField);
+    res.json({ doc_count: stats.count, oldest_ts: stats.oldest_ts, newest_ts: stats.newest_ts });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }

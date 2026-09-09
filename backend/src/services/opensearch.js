@@ -293,6 +293,45 @@ async function getIndexCount(conn, indexPattern, range = {}, tsField = '@timesta
 }
 
 /**
+ * Range-scoped stats for reconciliation: exact document count plus the oldest and
+ * newest timestamp within [range.gte, range.lte]. One _search with size:0 does all
+ * three (track_total_hits gives an exact count instead of the 10k cap; min/max aggs
+ * give the bounds). Pass an empty range to cover the whole index.
+ */
+async function getRangeStats(conn, indexPattern, range = {}, tsField = '@timestamp') {
+  const tsRange = {};
+  if (range.gte) tsRange.gte = range.gte;
+  if (range.lte) tsRange.lte = range.lte;
+  const filter = Object.keys(tsRange).length
+    ? [{ range: { [tsField]: { ...tsRange, format: 'strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSS||yyyy-MM-dd' } } }]
+    : [];
+  const body = {
+    size: 0,
+    track_total_hits: true,
+    query: filter.length ? { bool: { filter } } : { match_all: {} },
+    aggs: { min_ts: { min: { field: tsField } }, max_ts: { max: { field: tsField } } },
+  };
+  const res = await fetch(`${conn.url}/${indexPattern}/_search`, {
+    method: 'POST',
+    headers: { Authorization: authHeader(conn), 'Content-Type': 'application/json' },
+    agent: makeAgent(conn),
+    timeout: 15000,
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`_search stats HTTP ${res.status}: ${text}`);
+  }
+  const d = await res.json();
+  const total = typeof d.hits?.total === 'object' ? d.hits.total.value : d.hits?.total;
+  return {
+    count: total || 0,
+    oldest_ts: d.aggregations?.min_ts?.value_as_string || null,
+    newest_ts: d.aggregations?.max_ts?.value_as_string || null,
+  };
+}
+
+/**
  * Resolve a wildcard index pattern to a list of matching physical index names.
  * Uses _cat/indices and filters client-side (avoids _resolve API compat issues).
  */
@@ -305,4 +344,108 @@ async function discoverIndexes(conn, pattern) {
   return indices.filter(i => re.test(i.index));
 }
 
-module.exports = { testConnection, listIndices, getIndexTimestamps, sampleDocs, fetchPage, openPit, closePit, fetchPageWithPit, getIndexCount, discoverIndexes };
+/**
+ * Sliced scroll worker for a fixed time window.
+ * Fetches all documents belonging to this slice (id / max) within [range.gte, range.lte].
+ * Calls onPage(docs) for each page; docs include _id and _index injected from hit metadata.
+ * Cleans up the scroll context on finish or error.
+ */
+async function fetchSlicedWindow(conn, indexPattern, sliceId, sliceMax, batchSize, range = {}, tsField = '@timestamp', onPage) {
+  const tsRange = {};
+  if (range.gte) tsRange.gte = range.gte;
+  if (range.lte) tsRange.lte = range.lte;
+  if (range.lt)  tsRange.lt  = range.lt;   // exclusive upper bound for time-window partitioning
+
+  const query = {
+    size: Math.min(batchSize, 10000),
+    query: Object.keys(tsRange).length > 0
+      ? { bool: { filter: [{ range: { [tsField]: { ...tsRange, format: 'strict_date_optional_time' } } }] } }
+      : { match_all: {} },
+  };
+
+  // Only add slice block when using multiple workers — a max=1 slice is a no-op but some
+  // versions of OpenSearch reject it, so skip it entirely for the single-worker case.
+  if (sliceMax > 1) {
+    query.slice = { id: sliceId, max: sliceMax };
+  }
+
+  const initRes = await fetch(`${conn.url}/${indexPattern}/_search?scroll=2m`, {
+    method: 'POST',
+    headers: { Authorization: authHeader(conn), 'Content-Type': 'application/json' },
+    agent: makeAgent(conn),
+    timeout: 60000,
+    body: JSON.stringify(query),
+  });
+
+  if (!initRes.ok) {
+    const text = await initRes.text();
+    throw new Error(`Sliced scroll init (slice ${sliceId}/${sliceMax}) HTTP ${initRes.status}: ${text}`);
+  }
+
+  let data = await initRes.json();
+  let scrollId = data._scroll_id;
+
+  // A partial/failed scroll response (circuit breaker, cancelled search task, node
+  // timeout) can come back as HTTP 200 with timed_out=true or _shards.failed>0 and
+  // fewer/empty hits — which is indistinguishable from a genuine end-of-data unless
+  // we inspect these flags. Treating it as "done" would silently drop documents and
+  // let the caller advance its cursor past data that was never read. So we throw
+  // instead: the run fails loudly and the cursor is left untouched.
+  const assertHealthy = (resp, where) => {
+    if (resp.timed_out) {
+      throw new Error(`Sliced scroll ${where} (slice ${sliceId}/${sliceMax}) timed_out on the OpenSearch side — partial result, aborting to avoid data loss`);
+    }
+    const sh = resp._shards || {};
+    if ((sh.failed || 0) > 0) {
+      const reason = sh.failures?.[0]?.reason?.reason || sh.failures?.[0]?.reason?.type || 'unknown';
+      throw new Error(`Sliced scroll ${where} (slice ${sliceId}/${sliceMax}) had ${sh.failed}/${sh.total} shard failure(s): ${reason} — partial result, aborting to avoid data loss`);
+    }
+  };
+
+  // Total documents OpenSearch says match this window — used to verify we read them all.
+  const expectedTotal = typeof data.hits?.total === 'object' ? data.hits.total.value : (data.hits?.total ?? null);
+  let seen = 0;
+
+  try {
+    assertHealthy(data, 'init');
+    while (true) {
+      const hits = data.hits?.hits || [];
+      if (hits.length === 0) break;
+      seen += hits.length;
+      await onPage(hits.map(h => ({ ...h._source, _id: h._id, _index: h._index })));
+
+      const scrollRes = await fetch(`${conn.url}/_search/scroll`, {
+        method: 'POST',
+        headers: { Authorization: authHeader(conn), 'Content-Type': 'application/json' },
+        agent: makeAgent(conn),
+        timeout: 60000,
+        body: JSON.stringify({ scroll: '2m', scroll_id: scrollId }),
+      });
+      if (!scrollRes.ok) {
+        const text = await scrollRes.text();
+        throw new Error(`Sliced scroll page (slice ${sliceId}/${sliceMax}) HTTP ${scrollRes.status}: ${text}`);
+      }
+      data = await scrollRes.json();
+      assertHealthy(data, 'page');
+      scrollId = data._scroll_id || scrollId;
+    }
+
+    // Final completeness check: if OpenSearch reported N matches but we scrolled fewer,
+    // something dropped documents mid-scroll without raising an error. Fail loudly.
+    if (expectedTotal != null && seen < expectedTotal) {
+      throw new Error(`Sliced scroll (slice ${sliceId}/${sliceMax}) incomplete: read ${seen} of ${expectedTotal} matching docs — aborting to avoid data loss`);
+    }
+  } finally {
+    if (scrollId) {
+      fetch(`${conn.url}/_search/scroll`, {
+        method: 'DELETE',
+        headers: { Authorization: authHeader(conn), 'Content-Type': 'application/json' },
+        agent: makeAgent(conn),
+        timeout: 10000,
+        body: JSON.stringify({ scroll_id: scrollId }),
+      }).catch(() => {});
+    }
+  }
+}
+
+module.exports = { testConnection, listIndices, getIndexTimestamps, sampleDocs, fetchPage, openPit, closePit, fetchPageWithPit, getIndexCount, getRangeStats, discoverIndexes, fetchSlicedWindow };

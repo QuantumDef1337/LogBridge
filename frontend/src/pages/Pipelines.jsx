@@ -84,6 +84,9 @@ function fmtEta(remainingEvents, eps) {
 // ── Shared UI atoms ───────────────────────────────────────────────────────────
 
 function StatusDot({ status, run, isRunning }) {
+  // Stopping = pause was requested but the in-process loop hasn't fully exited yet
+  const stopping = isRunning && status === 'paused';
+  if (stopping) return <span className="w-2.5 h-2.5 rounded-full bg-amber-500 flex-shrink-0" />;
   if (isRunning) return (
     <span className="relative flex w-2.5 h-2.5">
       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
@@ -96,6 +99,12 @@ function StatusDot({ status, run, isRunning }) {
 }
 
 function StatusBadge({ status, run, isRunning }) {
+  // Stopping = pause requested, loop still draining its current batch
+  if (isRunning && status === 'paused') return (
+    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-950 text-amber-400 border border-amber-800/60">
+      Stopping…
+    </span>
+  );
   if (isRunning) return (
     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-blue-950 text-blue-300 border border-blue-800/60">
       Running
@@ -378,25 +387,51 @@ function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRun
             Checking source vs destination counts…
           </div>
         )}
-        {recon && !recon.pending && (
-          <div className="space-y-1.5">
-            {recon.error && <div className="text-xs text-red-400">{recon.error}</div>}
-            {(recon.indexes || []).map(ix => (
-              <div key={ix.index} className="flex items-center gap-3 px-3 py-2 bg-slate-800/60 rounded-lg text-xs">
-                <span className={`font-medium w-16 flex-shrink-0 ${
-                  ix.status === 'MATCH' ? 'text-emerald-400'
-                  : ix.status === 'MISMATCH' ? 'text-red-400'
+        {recon && !recon.pending && (() => {
+          const row = (recon.indexes || [])[0] || {};
+          const src = recon.source?.count ?? row.source_count;
+          const dst = recon.dest?.count ?? row.dest_count;
+          const remaining = recon.remaining != null ? recon.remaining
+            : (src != null && dst != null ? Math.max(0, src - dst) : null);
+          const pct = src ? Math.min(100, Math.round((dst / src) * 100)) : null;
+          const w = recon.window;
+          const rowErr = recon.error || row.error;
+          return (
+            <div className="space-y-2">
+              {rowErr && <div className="text-xs text-red-400">{rowErr}</div>}
+              {w && (
+                <div className="text-[10px] text-slate-500">
+                  Window ({w.mode}): {w.from ? fmtTs(w.from) : '—'} → {w.to ? fmtTs(w.to) : 'now / all'}
+                </div>
+              )}
+              <div className="flex flex-wrap items-center gap-3 px-3 py-2.5 bg-slate-800/60 rounded-lg text-xs">
+                <span className={`font-medium w-20 flex-shrink-0 ${
+                  recon.overall === 'MATCH' ? 'text-emerald-400'
+                  : recon.overall === 'MISMATCH' ? 'text-amber-400'
                   : 'text-slate-400'
-                }`}>{ix.status}</span>
-                <span className="font-mono text-slate-300 flex-1 truncate">{ix.index}</span>
-                <span className="text-slate-400">src: <span className="text-white">{ix.source_count?.toLocaleString() ?? '?'}</span></span>
-                <span className="text-slate-400">dst: <span className="text-white">{ix.dest_count?.toLocaleString() ?? '?'}</span></span>
-                {ix.status === 'MISMATCH' && <span className="text-red-400">Δ {Math.abs((ix.source_count||0) - (ix.dest_count||0)).toLocaleString()}</span>}
-                {ix.error && <span className="text-red-400 truncate max-w-[200px]">{ix.error.slice(0, 60)}</span>}
+                }`}>{recon.overall === 'MATCH' ? 'COMPLETE' : recon.overall === 'MISMATCH' ? 'PARTIAL' : 'INCONCLUSIVE'}</span>
+                <span className="text-slate-400">Source (OpenSearch): <span className="text-white font-medium">{src?.toLocaleString() ?? '?'}</span></span>
+                <span className="text-slate-400">Ingested (ClickHouse): <span className="text-white font-medium">{dst?.toLocaleString() ?? '?'}</span></span>
+                {remaining != null && (
+                  <span className={remaining > 0 ? 'text-amber-400' : 'text-emerald-400'}>
+                    Remaining: <span className="font-medium">{remaining.toLocaleString()}</span>
+                  </span>
+                )}
+                {pct != null && <span className="text-slate-500">({pct}% ingested)</span>}
               </div>
-            ))}
-          </div>
-        )}
+              {(recon.source || recon.dest) && (
+                <div className="grid grid-cols-2 gap-2 text-[10px] text-slate-500">
+                  <div className="px-3 py-1.5 bg-slate-800/40 rounded">
+                    Source span: <span className="font-mono text-slate-400">{recon.source?.oldest_ts ? fmtTs(recon.source.oldest_ts) : '—'}</span> → <span className="font-mono text-slate-400">{recon.source?.newest_ts ? fmtTs(recon.source.newest_ts) : '—'}</span>
+                  </div>
+                  <div className="px-3 py-1.5 bg-slate-800/40 rounded">
+                    Ingested span: <span className="font-mono text-slate-400">{recon.dest?.oldest_ts ? fmtTs(recon.dest.oldest_ts) : '—'}</span> → <span className="font-mono text-slate-400">{recon.dest?.newest_ts ? fmtTs(recon.dest.newest_ts) : '—'}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </div>
     </div>
   );
@@ -752,6 +787,7 @@ export default function Pipelines() {
     setReconcilingId(p.id);
     setReconcileResult(s => ({ ...s, [p.id]: { pending: true } }));
     try {
+      // Backend derives the comparison window from the pipeline's pull mode.
       const r = await api.reconcile(p.id);
       setReconcileResult(s => ({ ...s, [p.id]: r }));
     } catch (e) {

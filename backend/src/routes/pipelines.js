@@ -20,6 +20,7 @@ const PIPELINE_FIELDS = `
   p.dedup_enabled, p.dedup_field, p.dedup_algo,
   p.poll_interval_secs, p.retry_count, p.pause_on_fail, p.timestamp_field,
   p.excluded_fields,
+  p.schedule_cron, p.schedule_lookback_hours, p.parallel_slices,
   p.created_at, p.updated_at,
   ps.status as run_status, ps.last_run_at, ps.last_success_at, ps.last_error,
   ps.rows_inserted_total, ps.rows_inserted_today, ps.rows_inserted_week,
@@ -70,8 +71,9 @@ router.post('/', (req, res) => {
       customer_source, customer_value, product_source, product_value,
       batch_mode, batch_size, batch_timeout_ms,
       dedup_enabled, dedup_field, dedup_algo,
-      poll_interval_secs, retry_count, pause_on_fail, timestamp_field, excluded_fields
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      poll_interval_secs, retry_count, pause_on_fail, timestamp_field, excluded_fields,
+      schedule_cron, schedule_lookback_hours, parallel_slices
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).run(
     p.name, p.description || '', 'paused',
     p.opensearch_connection_id || null, p.index_pattern || '', JSON.stringify(p.index_set_filter || []),
@@ -84,7 +86,8 @@ router.post('/', (req, res) => {
     p.dedup_enabled !== false ? 1 : 0, p.dedup_field || 'raw_data', p.dedup_algo || 'md5',
     p.poll_interval_secs || 30, p.retry_count || 3, p.pause_on_fail !== false ? 1 : 0,
     p.timestamp_field || '@timestamp',
-    JSON.stringify(p.excluded_fields || [])
+    JSON.stringify(p.excluded_fields || []),
+    p.schedule_cron || null, p.schedule_lookback_hours || 24, p.parallel_slices || 1
   );
 
   // Create initial status row
@@ -109,6 +112,7 @@ router.put('/:id', (req, res) => {
       batch_mode=?, batch_size=?, batch_timeout_ms=?,
       dedup_enabled=?, dedup_field=?, dedup_algo=?,
       poll_interval_secs=?, retry_count=?, pause_on_fail=?, timestamp_field=?, excluded_fields=?,
+      schedule_cron=?, schedule_lookback_hours=?, parallel_slices=?,
       updated_at=datetime('now')
     WHERE id=?
   `).run(
@@ -123,6 +127,7 @@ router.put('/:id', (req, res) => {
     p.poll_interval_secs, p.retry_count, p.pause_on_fail ? 1 : 0,
     p.timestamp_field || '@timestamp',
     JSON.stringify(typeof p.excluded_fields === 'string' ? JSON.parse(p.excluded_fields) : p.excluded_fields || []),
+    p.schedule_cron || null, p.schedule_lookback_hours || 24, p.parallel_slices || 1,
     req.params.id
   );
   audit.info('pipeline', `Pipeline updated: "${p.name}"`, parseInt(req.params.id));
@@ -249,7 +254,16 @@ router.post('/:id/run-now', async (req, res) => {
 
   try {
     let out;
-    if (physicalIndexes && physicalIndexes.length > 0) {
+    if (ctx.pipeline.pull_mode === 'scheduled') {
+      // Scheduled mode: cursor-based window (cursor_timestamp → now).
+      const opts = req.body?.forceFrom ? { forceFrom: new Date(req.body.forceFrom) } : {};
+      out = await runner.runScheduledSlices(ctx.conn, ctx.cluster, ctx.pipeline, opts);
+    } else if (ctx.pipeline.pull_mode === 'date_range' && (ctx.pipeline.parallel_slices || 1) > 1) {
+      // date_range + parallel workers: same time-window partitioning over the explicit range.
+      const from = new Date(ctx.pipeline.pull_from_date);
+      const to   = ctx.pipeline.pull_to_date ? new Date(ctx.pipeline.pull_to_date) : new Date();
+      out = await runner.runScheduledSlices(ctx.conn, ctx.cluster, ctx.pipeline, { forceFrom: from, to });
+    } else if (physicalIndexes && physicalIndexes.length > 0) {
       // Multi-index mode: run each physical index using per-index cursors (same as scheduler)
       let totalFetched = 0, totalInserted = 0, totalDlq = 0;
       for (const indexName of physicalIndexes) {
@@ -269,7 +283,7 @@ router.post('/:id/run-now', async (req, res) => {
 
     db.prepare("UPDATE pipeline_status SET status='idle', last_error=NULL WHERE pipeline_id=?").run(pipelineId);
     db.prepare("INSERT INTO pipeline_logs (pipeline_id, level, message) VALUES (?, 'info', ?)")
-      .run(pipelineId, `Run-now: fetched ${out.fetched}, inserted ${out.inserted}, dlq ${out.dlq}`);
+      .run(pipelineId, `Run-now: fetched ${out.fetched}, inserted ${out.inserted}, dlq ${out.dlq || 0}`);
 
     res.json({ ok: true, ...out });
   } catch (e) {
@@ -351,54 +365,67 @@ router.post('/:id/reconcile', async (req, res) => {
   if (!ctx.cluster) return res.status(400).json({ error: 'No ClickHouse cluster configured' });
   if (!ctx.pipeline.clickhouse_table) return res.status(400).json({ error: 'No destination table configured' });
 
-  const { from: fromDate, to: toDate } = req.body || {};
+  const { pipeline, conn, cluster } = ctx;
+  const tsField = pipeline.timestamp_field || '@timestamp';
+
+  // ── Mode-aware reconciliation window ────────────────────────────────────────
+  // The range we compare over depends on what the pipeline was configured to pull:
+  //   date_range → [from, to]   from_date → [from, now]   continuous/scheduled → whole index
+  // An explicit {from,to} in the request body overrides (used by manual re-checks).
+  let fromDate, toDate;
+  if (req.body?.from || req.body?.to) {
+    fromDate = req.body.from; toDate = req.body.to;
+  } else if (pipeline.pull_mode === 'date_range') {
+    fromDate = pipeline.pull_from_date; toDate = pipeline.pull_to_date;
+  } else if (pipeline.pull_mode === 'from_date') {
+    fromDate = pipeline.pull_from_date; toDate = null;
+  } // continuous / scheduled → no bounds (compare the whole index)
+
   const range = {};
   if (fromDate) range.gte = fromDate;
   if (toDate) range.lte = toDate;
 
-  const { pipeline, conn, cluster } = ctx;
-  const { pipeline: p } = ctx;
-
-  // Determine which indexes to reconcile
+  // Scope the source count to the physically-selected indexes if any, else the pattern.
   let indexList;
   try { indexList = JSON.parse(pipeline.index_set_filter || '[]'); } catch { indexList = []; }
-  if (indexList.length === 0) indexList = [pipeline.index_pattern];
+  const target = indexList.length ? indexList.join(',') : pipeline.index_pattern;
 
-  const results = [];
-  for (const indexName of indexList) {
-    let sourceCount = null, destCount = null, status = 'INCONCLUSIVE', error = null;
-    try {
-      sourceCount = await os_svc.getIndexCount(conn, indexName, range);
-    } catch (e) {
-      error = `OpenSearch: ${e.message}`;
-    }
-    try {
-      // Build a WHERE clause scoped to the time range if provided
-      let whereClause = '';
-      if (fromDate || toDate) {
-        const parts = [];
-        if (fromDate) parts.push(`event_time >= '${fromDate.replace(/'/g, '')}'`);
-        if (toDate) parts.push(`event_time <= '${toDate.replace(/'/g, '')}'`);
-        whereClause = parts.join(' AND ');
-      }
-      destCount = await ch_svc.countRows(cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, whereClause);
-    } catch (e) {
-      error = (error ? error + '; ' : '') + `ClickHouse: ${e.message}`;
-    }
-
-    if (sourceCount !== null && destCount !== null) {
-      status = sourceCount === destCount ? 'MATCH' : 'MISMATCH';
-    }
-    results.push({ index: indexName, source_count: sourceCount, dest_count: destCount, status, error });
+  let source = null, dest = null, error = null;
+  try {
+    source = await os_svc.getRangeStats(conn, target, range, tsField);
+  } catch (e) {
+    error = `OpenSearch: ${e.message}`;
+  }
+  try {
+    // Normalize ISO dates (2026-02-08T17:59) → ClickHouse format (2026-02-08 17:59:00).
+    const toChDate = (s) => s.replace(/'/g, '').replace('T', ' ').replace(/Z$/, '') + (s.includes(':') && s.split(':').length < 3 ? ':00' : '');
+    const parts = [];
+    if (fromDate) parts.push(`timestamp >= '${toChDate(fromDate)}'`);
+    if (toDate) parts.push(`timestamp <= '${toChDate(toDate)}'`);
+    dest = await ch_svc.getRangeStats(cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, parts.join(' AND '));
+  } catch (e) {
+    error = (error ? error + '; ' : '') + `ClickHouse: ${e.message}`;
   }
 
-  const overallStatus = results.every(r => r.status === 'MATCH')
-    ? 'MATCH'
-    : results.some(r => r.status === 'MISMATCH')
-      ? 'MISMATCH'
-      : 'INCONCLUSIVE';
+  const sourceCount = source?.count ?? null;
+  const destCount = dest?.count ?? null;
+  let status = 'INCONCLUSIVE';
+  let remaining = null;
+  if (sourceCount !== null && destCount !== null) {
+    status = sourceCount === destCount ? 'MATCH' : 'MISMATCH';
+    remaining = Math.max(0, sourceCount - destCount);
+  }
 
-  res.json({ ok: true, overall: overallStatus, indexes: results });
+  res.json({
+    ok: true,
+    overall: status,
+    window: { from: fromDate || null, to: toDate || null, mode: pipeline.pull_mode },
+    source,          // { count, oldest_ts, newest_ts }
+    dest,            // { count, oldest_ts, newest_ts }
+    remaining,       // source.count − dest.count (docs still to ingest)
+    // Back-compat single row for the existing table renderer.
+    indexes: [{ index: target, source_count: sourceCount, dest_count: destCount, status, error }],
+  });
 });
 
 // ── Dead Letter Queue ────────────────────────────────────────────────────────
@@ -459,6 +486,8 @@ function parsePipeline(row) {
   try { row.field_mappings = JSON.parse(row.field_mappings || '[]'); } catch { row.field_mappings = []; }
   try { row.index_set_filter = JSON.parse(row.index_set_filter || '[]'); } catch { row.index_set_filter = []; }
   try { row.excluded_fields = JSON.parse(row.excluded_fields || '[]'); } catch { row.excluded_fields = []; }
+  row.schedule_lookback_hours = row.schedule_lookback_hours || 24;
+  row.parallel_slices = row.parallel_slices || 1;
   return row;
 }
 

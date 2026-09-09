@@ -215,6 +215,9 @@ function initSchema() {
   addColumnIfMissing('pipeline_status', 'event_lag_secs', 'REAL DEFAULT NULL'); // now - cursor_timestamp at commit time
   addColumnIfMissing('pipelines', 'timestamp_field', "TEXT DEFAULT '@timestamp'");
   addColumnIfMissing('pipelines', 'excluded_fields', "TEXT DEFAULT '[]'");
+  addColumnIfMissing('pipelines', 'schedule_cron', 'TEXT');
+  addColumnIfMissing('pipelines', 'schedule_lookback_hours', 'INTEGER DEFAULT 24');
+  addColumnIfMissing('pipelines', 'parallel_slices', 'INTEGER DEFAULT 1');
 
   // Seed default admin user
   const userCount = db.prepare('SELECT COUNT(*) as c FROM users').get();
