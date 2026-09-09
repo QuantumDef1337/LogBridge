@@ -178,6 +178,9 @@ export default function Jobs() {
   const latestLogId = useRef(0);
   const clearedAt = useRef(null); // ISO string — hide logs created before this
   const [hasNew, setHasNew] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [hasOlder, setHasOlder] = useState(true);
+  const oldestLogId = useRef(null);
 
   function changeTz(v) { setTzPref(v); setTzState(v); }
 
@@ -187,7 +190,7 @@ export default function Jobs() {
 
   const loadLogs = useCallback(async () => {
     try {
-      const params = { limit: 300 };
+      const params = { limit: 500 };
       if (levelFilter) params.level = levelFilter;
       if (logFilter) params.pipeline_id = logFilter;
       const rows = await api.getJobLogs(params);
@@ -195,10 +198,30 @@ export default function Jobs() {
         const newest = rows[rows.length - 1].id;
         if (latestLogId.current > 0 && newest > latestLogId.current) setHasNew(true);
         latestLogId.current = Math.max(latestLogId.current, newest);
+        if (oldestLogId.current === null) oldestLogId.current = rows[0].id;
       }
       setLogs(rows);
+      setHasOlder(rows.length >= 500);
     } catch {}
   }, [levelFilter, logFilter]);
+
+  async function loadOlderLogs() {
+    if (!oldestLogId.current || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      const params = { limit: 500, before_id: oldestLogId.current };
+      if (levelFilter) params.level = levelFilter;
+      if (logFilter) params.pipeline_id = logFilter;
+      const older = await api.getJobLogs(params);
+      if (older.length > 0) {
+        oldestLogId.current = older[0].id;
+        setLogs(prev => [...older, ...prev]);
+        setHasOlder(older.length >= 500);
+      } else {
+        setHasOlder(false);
+      }
+    } catch {} finally { setLoadingOlder(false); }
+  }
 
   useEffect(() => {
     loadJobs();
@@ -518,14 +541,30 @@ export default function Jobs() {
 
         <div
           ref={logRef}
-          className="h-80 overflow-y-auto bg-slate-950 px-4 py-2 font-mono"
+          className="h-[32rem] overflow-y-auto bg-slate-950 px-4 py-2 font-mono"
           onScroll={e => {
             const el = e.currentTarget;
             const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
             if (atBottom) setHasNew(false);
             setAutoScroll(atBottom);
+            // Auto-load older when scrolled near top
+            if (el.scrollTop < 80 && hasOlder && !loadingOlder) loadOlderLogs();
           }}
         >
+          {/* Load older button at top */}
+          {visibleLogs.length > 0 && (
+            <div className="text-center py-2">
+              {hasOlder ? (
+                <button onClick={loadOlderLogs} disabled={loadingOlder}
+                  className="text-xs text-slate-500 hover:text-slate-300 border border-slate-700 rounded px-3 py-1 transition-colors disabled:opacity-40">
+                  {loadingOlder ? 'Loading…' : '↑ Load older logs'}
+                </button>
+              ) : (
+                <span className="text-xs text-slate-700">— beginning of log history —</span>
+              )}
+            </div>
+          )}
+
           {visibleLogs.length === 0 ? (
             <div className="text-slate-600 text-xs text-center py-8">
               {clearedAt.current ? 'Feed cleared — new events will appear here.' : 'No events yet — actions appear here immediately.'}
@@ -535,9 +574,12 @@ export default function Jobs() {
           )}
         </div>
 
-        <div className="px-5 py-1.5 border-t border-slate-800 text-xs text-slate-600">
-          {visibleLogs.length} entries · polling every 1.5s
-          {clearedAt.current && <span className="ml-2 text-slate-700">· cleared {new Date(clearedAt.current).toLocaleTimeString()}</span>}
+        <div className="px-5 py-1.5 border-t border-slate-800 text-xs text-slate-600 flex items-center justify-between">
+          <span>
+            {visibleLogs.length.toLocaleString()} entries shown · polling every 1.5s
+            {clearedAt.current && <span className="ml-2 text-slate-700">· cleared {new Date(clearedAt.current).toLocaleTimeString()}</span>}
+          </span>
+          <a href="/log-history" className="text-slate-500 hover:text-brand-400 transition-colors">View full log history →</a>
         </div>
       </div>
     </div>

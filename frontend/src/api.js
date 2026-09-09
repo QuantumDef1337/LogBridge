@@ -70,6 +70,7 @@ export const api = {
   getJobs: () => req('GET', '/jobs'),
   getJobLogs: (params = {}) => req('GET', '/jobs/logs?' + new URLSearchParams(params)),
   getPipelineJobLogs: (id, limit = 100) => req('GET', `/jobs/${id}/logs?limit=${limit}`),
+  getLogHistory: (params = {}) => req('GET', '/jobs/log-history?' + new URLSearchParams(params)),
 
   // Pipeline partitions & reconciliation
   getPartitions: (id) => req('GET', `/pipelines/${id}/partitions`),

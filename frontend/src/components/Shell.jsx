@@ -2,13 +2,14 @@ import React, { useState } from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, GitBranch,
-  LogOut, Menu, X, Cable, Briefcase,
+  LogOut, Menu, X, Cable, Briefcase, ScrollText,
 } from 'lucide-react';
 
 const nav = [
   { to: '/dashboard',   icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/pipelines',   icon: GitBranch,        label: 'Pipelines' },
   { to: '/jobs',        icon: Briefcase,         label: 'Jobs' },
+  { to: '/log-history', icon: ScrollText,        label: 'Log History' },
   { to: '/connections', icon: Cable,             label: 'Connections' },
 ];
 

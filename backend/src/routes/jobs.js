@@ -54,13 +54,15 @@ router.get('/', (req, res) => {
 });
 
 // Live log feed — recent entries across all pipelines + system audit events, newest first
+// Supports: limit, level, since, pipeline_id, before_id (cursor for "load older")
 router.get('/logs', (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit || '300'), 1000);
-  const level = req.query.level;
-  const since = req.query.since;
+  const limit = Math.min(parseInt(req.query.limit || '500'), 2000);
+  const level      = req.query.level;
+  const since      = req.query.since;
+  const beforeId   = req.query.before_id ? parseInt(req.query.before_id) : null;
   const pipelineId = req.query.pipeline_id;
+  const search     = req.query.search;
 
-  // LEFT JOIN so system events (pipeline_id IS NULL) are included with pipeline_name = '[system]'
   let sql = `
     SELECT l.id, l.pipeline_id, COALESCE(p.name, '[system]') as pipeline_name, l.level, l.message, l.created_at
     FROM pipeline_logs l
@@ -69,21 +71,58 @@ router.get('/logs', (req, res) => {
   `;
   const params = [];
 
-  if (level) { sql += ' AND l.level = ?'; params.push(level); }
-  if (since) { sql += ' AND l.created_at > ?'; params.push(since); }
-  // When filtering by pipeline, include system events too (pipeline_id IS NULL)
+  if (level)      { sql += ' AND l.level = ?';            params.push(level); }
+  if (since)      { sql += ' AND l.created_at > ?';       params.push(since); }
+  if (beforeId)   { sql += ' AND l.id < ?';               params.push(beforeId); }
+  if (search)     { sql += ' AND l.message LIKE ?';       params.push(`%${search}%`); }
   if (pipelineId) { sql += ' AND (l.pipeline_id = ? OR l.pipeline_id IS NULL)'; params.push(pipelineId); }
 
-  sql += ' ORDER BY l.created_at DESC, l.id DESC LIMIT ?';
+  sql += ' ORDER BY l.id DESC LIMIT ?';
   params.push(limit);
 
   const rows = getDb().prepare(sql).all(...params);
   res.json(rows.reverse()); // return chronological order
 });
 
+// Log history — paginated, searchable, for the dedicated logs page
+router.get('/log-history', (req, res) => {
+  const page       = Math.max(1, parseInt(req.query.page || '1'));
+  const limit      = Math.min(parseInt(req.query.limit || '200'), 1000);
+  const offset     = (page - 1) * limit;
+  const level      = req.query.level;
+  const pipelineId = req.query.pipeline_id;
+  const search     = req.query.search;
+  const dateFrom   = req.query.date_from;
+  const dateTo     = req.query.date_to;
+
+  let where = 'WHERE 1=1';
+  const params = [];
+
+  if (level)      { where += ' AND l.level = ?';            params.push(level); }
+  if (pipelineId) { where += ' AND l.pipeline_id = ?';      params.push(pipelineId); }
+  if (search)     { where += ' AND l.message LIKE ?';       params.push(`%${search}%`); }
+  if (dateFrom)   { where += ' AND l.created_at >= ?';      params.push(dateFrom); }
+  if (dateTo)     { where += ' AND l.created_at <= ?';      params.push(dateTo + 'T23:59:59'); }
+
+  const db = getDb();
+  const countRow = db.prepare(`SELECT COUNT(*) as total FROM pipeline_logs l ${where}`).get(...params);
+  const total = countRow.total;
+
+  const rows = db.prepare(`
+    SELECT l.id, l.pipeline_id, COALESCE(p.name, '[system]') as pipeline_name, l.level, l.message, l.created_at
+    FROM pipeline_logs l
+    LEFT JOIN pipelines p ON p.id = l.pipeline_id
+    ${where}
+    ORDER BY l.id DESC
+    LIMIT ? OFFSET ?
+  `).all(...params, limit, offset);
+
+  res.json({ rows, total, page, limit, pages: Math.ceil(total / limit) });
+});
+
 // Per-pipeline log history
 router.get('/:id/logs', (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit || '100'), 500);
+  const limit = Math.min(parseInt(req.query.limit || '100'), 1000);
   const rows = getDb().prepare(
     `SELECT id, level, message, created_at
      FROM pipeline_logs WHERE pipeline_id = ?
