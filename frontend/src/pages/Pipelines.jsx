@@ -393,7 +393,11 @@ function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRun
           const dst = recon.dest?.count ?? row.dest_count;
           const remaining = recon.remaining != null ? recon.remaining
             : (src != null && dst != null ? Math.max(0, src - dst) : null);
-          const pct = src ? Math.min(100, Math.round((dst / src) * 100)) : null;
+          // Only show 100% when truly complete (remaining === 0). Otherwise floor to
+          // one decimal so "almost done" never rounds up to a misleading 100%.
+          const pct = !src ? null
+            : remaining === 0 ? 100
+            : Math.min(99.9, Math.floor((dst / src) * 1000) / 10);
           const w = recon.window;
           const rowErr = recon.error || row.error;
           return (
