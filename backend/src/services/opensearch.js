@@ -78,20 +78,24 @@ async function getIndexTimestamps(conn, indexPattern, tsField = '@timestamp') {
 }
 
 async function sampleDocs(conn, indexPattern, size = 5, tsField = '@timestamp') {
-  const res = await fetch(`${conn.url}/${indexPattern}/_search`, {
-    method: 'POST',
-    headers: { Authorization: authHeader(conn), 'Content-Type': 'application/json' },
-    agent: makeAgent(conn),
-    timeout: 15000,
-    body: JSON.stringify({
-      size,
-      sort: [{ [tsField]: 'desc' }],
-      query: { match_all: {} },
-    }),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const body = await res.json();
-  return (body.hits?.hits || []).map(h => h._source);
+  // Try with sort first; if OpenSearch rejects (e.g. @timestamp not mapped), fall back to unsorted.
+  for (const body of [
+    { size, sort: [{ [tsField]: 'desc' }], query: { match_all: {} } },
+    { size, query: { match_all: {} } },
+  ]) {
+    const res = await fetch(`${conn.url}/${indexPattern}/_search`, {
+      method: 'POST',
+      headers: { Authorization: authHeader(conn), 'Content-Type': 'application/json' },
+      agent: makeAgent(conn),
+      timeout: 15000,
+      body: JSON.stringify(body),
+    });
+    if (res.status === 400) continue; // sort field not mapped — retry without sort
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return (data.hits?.hits || []).map(h => h._source);
+  }
+  throw new Error('HTTP 400');
 }
 
 async function fetchPage(conn, indexPattern, batchSize, cursorTs, cursorId, range = {}, tsField = '@timestamp') {
