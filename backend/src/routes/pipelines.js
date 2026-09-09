@@ -409,11 +409,19 @@ router.post('/:id/reconcile', async (req, res) => {
 
   const sourceCount = source?.count ?? null;
   const destCount = dest?.count ?? null;
+  // Three coherent outcomes instead of a bare MATCH/MISMATCH:
+  //   MATCH    dst === src                 → fully reconciled
+  //   MISMATCH dst  <  src → remaining>0   → still ingesting (or a gap)
+  //   EXCESS   dst  >  src → excess>0       → ClickHouse has MORE than the source
+  //            (duplicate rows, or the source lost data to retention/rotation)
   let status = 'INCONCLUSIVE';
-  let remaining = null;
+  let remaining = null, excess = null;
   if (sourceCount !== null && destCount !== null) {
-    status = sourceCount === destCount ? 'MATCH' : 'MISMATCH';
+    if (destCount === sourceCount) status = 'MATCH';
+    else if (destCount < sourceCount) status = 'MISMATCH';
+    else status = 'EXCESS';
     remaining = Math.max(0, sourceCount - destCount);
+    excess = Math.max(0, destCount - sourceCount);
   }
 
   res.json({
@@ -423,6 +431,7 @@ router.post('/:id/reconcile', async (req, res) => {
     source,          // { count, oldest_ts, newest_ts }
     dest,            // { count, oldest_ts, newest_ts }
     remaining,       // source.count − dest.count (docs still to ingest)
+    excess,          // dest.count − source.count (extra rows in ClickHouse — likely duplicates)
     // Back-compat single row for the existing table renderer.
     indexes: [{ index: target, source_count: sourceCount, dest_count: destCount, status, error }],
   });

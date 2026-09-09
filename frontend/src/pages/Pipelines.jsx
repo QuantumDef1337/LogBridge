@@ -393,13 +393,24 @@ function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRun
           const dst = recon.dest?.count ?? row.dest_count;
           const remaining = recon.remaining != null ? recon.remaining
             : (src != null && dst != null ? Math.max(0, src - dst) : null);
-          // Only show 100% when truly complete (remaining === 0). Otherwise floor to
-          // one decimal so "almost done" never rounds up to a misleading 100%.
-          const pct = !src ? null
+          const excess = recon.excess != null ? recon.excess
+            : (src != null && dst != null ? Math.max(0, dst - src) : null);
+          const isExcess = recon.overall === 'EXCESS' || (excess != null && excess > 0);
+          // % ingested only makes sense while catching up. 100% only when exactly complete;
+          // when dst > src we don't show a % (it's an over-count, not progress).
+          const pct = !src || isExcess ? null
             : remaining === 0 ? 100
             : Math.min(99.9, Math.floor((dst / src) * 1000) / 10);
           const w = recon.window;
           const rowErr = recon.error || row.error;
+          const verdict = recon.overall === 'MATCH' ? 'COMPLETE'
+            : recon.overall === 'MISMATCH' ? 'PARTIAL'
+            : recon.overall === 'EXCESS' ? 'OVER-COUNT'
+            : 'INCONCLUSIVE';
+          const verdictColor = recon.overall === 'MATCH' ? 'text-emerald-400'
+            : recon.overall === 'MISMATCH' ? 'text-amber-400'
+            : recon.overall === 'EXCESS' ? 'text-orange-400'
+            : 'text-slate-400';
           return (
             <div className="space-y-2">
               {rowErr && <div className="text-xs text-red-400">{rowErr}</div>}
@@ -409,14 +420,14 @@ function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRun
                 </div>
               )}
               <div className="flex flex-wrap items-center gap-3 px-3 py-2.5 bg-slate-800/60 rounded-lg text-xs">
-                <span className={`font-medium w-20 flex-shrink-0 ${
-                  recon.overall === 'MATCH' ? 'text-emerald-400'
-                  : recon.overall === 'MISMATCH' ? 'text-amber-400'
-                  : 'text-slate-400'
-                }`}>{recon.overall === 'MATCH' ? 'COMPLETE' : recon.overall === 'MISMATCH' ? 'PARTIAL' : 'INCONCLUSIVE'}</span>
+                <span className={`font-medium w-24 flex-shrink-0 ${verdictColor}`}>{verdict}</span>
                 <span className="text-slate-400">Source (OpenSearch): <span className="text-white font-medium">{src?.toLocaleString() ?? '?'}</span></span>
                 <span className="text-slate-400">Ingested (ClickHouse): <span className="text-white font-medium">{dst?.toLocaleString() ?? '?'}</span></span>
-                {remaining != null && (
+                {isExcess ? (
+                  <span className="text-orange-400">
+                    Excess: <span className="font-medium">+{excess.toLocaleString()}</span> <span className="text-slate-500">(dst &gt; src — likely duplicates or source retention)</span>
+                  </span>
+                ) : remaining != null && (
                   <span className={remaining > 0 ? 'text-amber-400' : 'text-emerald-400'}>
                     Remaining: <span className="font-medium">{remaining.toLocaleString()}</span>
                   </span>
