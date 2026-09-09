@@ -297,8 +297,8 @@ function parseBatchInsert(body) {
     inserted: parseInt(m[1].replace(/,/g, '')),
     fetched:  parseInt(m[2].replace(/,/g, '')),
     skipped:  parseInt(m[3].replace(/,/g, '')),
-    fromTs:   body.match(/from:(\S+)/)?.[1] || null,
-    toTs:     body.match(/to:(\S+)/)?.[1]   || null,
+    fromTs:   body.match(/from:(\d{4}-\d{2}-\d{2}[T ][\d:.]+)/)?.[1] || null,
+    toTs:     body.match(/to:(\d{4}-\d{2}-\d{2}[T ][\d:.]+)/)?.[1]   || null,
     index:    body.match(/index:(\S+)/)?.[1] || null,
   };
 }

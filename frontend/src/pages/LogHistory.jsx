@@ -31,8 +31,8 @@ const LEVEL_BADGE = {
 function parseBatchInsert(body) {
   const m = body.match(/Batch inserted:\s*([\d,]+)\s*rows/i);
   if (!m) return null;
-  const fromM  = body.match(/from:(\S+)/);
-  const toM    = body.match(/to:(\S+)/);
+  const fromM  = body.match(/from:(\d{4}-\d{2}-\d{2}[T ][\d:.]+)/);
+  const toM    = body.match(/to:(\d{4}-\d{2}-\d{2}[T ][\d:.]+)/);
   const indexM = body.match(/index:(\S+)/);
   return {
     inserted: parseInt(m[1].replace(/,/g, '')),
