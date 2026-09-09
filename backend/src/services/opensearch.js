@@ -200,7 +200,7 @@ async function fetchPageWithPit(conn, pitId, batchSize, cursorTs, cursorId, rang
 
   const filters = [];
   if (Object.keys(tsRange).length > 0) {
-    filters.push({ range: { [tsField]: tsRange } });
+    filters.push({ range: { [tsField]: { ...tsRange, format: 'strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSS||yyyy-MM-dd' } } });
   }
 
   const query = {
@@ -270,7 +270,7 @@ async function getIndexCount(conn, indexPattern, range = {}, tsField = '@timesta
   const tsRange = {};
   if (range.gte) tsRange.gte = range.gte;
   if (range.lte) tsRange.lte = range.lte;
-  if (Object.keys(tsRange).length > 0) filters.push({ range: { [tsField]: tsRange } });
+  if (Object.keys(tsRange).length > 0) filters.push({ range: { [tsField]: { ...tsRange, format: 'strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSS||yyyy-MM-dd' } } });
 
   const body = filters.length ? { query: { bool: { filter: filters } } } : {};
   const res = await fetch(`${conn.url}/${indexPattern}/_count`, {
