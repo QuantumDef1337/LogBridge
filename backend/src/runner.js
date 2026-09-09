@@ -604,6 +604,9 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
   async function runWorker(workerId, range) {
     let workerFetched = 0, workerInserted = 0, workerSkipped = 0, workerDlq = 0;
     let batchRows = [];
+    // Timing for per-batch throughput. lastFlushAt marks the end of the previous batch
+    // cycle so we can measure the full fetch→transform→insert interval for this one.
+    let lastFlushAt = Date.now();
 
     async function flushBatch() {
       if (!batchRows.length) return;
@@ -621,14 +624,27 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
       }
       if (insertRows.length) {
         const ndjson = insertRows.map(r => JSON.stringify(r)).join('\n');
+        const insertStart = Date.now();
         await withRetry(
           () => ch.insertRows(cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, ndjson),
           retryOpts
         );
+        const now = Date.now();
         workerInserted += insertRows.length;
         metrics.recordIngestion(insertRows.length, Buffer.byteLength(ndjson, 'utf8'));
+
+        // Two rates: cycle = end-to-end throughput (fetch+transform+insert since the last
+        // batch); insert = pure ClickHouse write speed for this batch.
+        const cycleMs = Math.max(1, now - lastFlushAt);
+        const insertMs = Math.max(1, now - insertStart);
+        const cycleRate = Math.round(insertRows.length / (cycleMs / 1000));
+        const insertRate = Math.round(insertRows.length / (insertMs / 1000));
+        lastFlushAt = now;
+
         pipelineLog(pipeline.id, 'info',
-          `[worker-${workerId}] Batch inserted: ${insertRows.length} rows (skipped ${workerSkipped} dedup)`
+          `[worker-${workerId}] Batch inserted: ${insertRows.length} rows in ${(cycleMs / 1000).toFixed(1)}s ` +
+          `(${cycleRate.toLocaleString()} rows/sec · insert ${insertRate.toLocaleString()}/s) ` +
+          `(skipped ${workerSkipped} dedup)`
         );
       }
       batchRows = [];
