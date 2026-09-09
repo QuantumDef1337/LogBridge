@@ -39,7 +39,7 @@ Built with Node.js 24, React 18, and SQLite — zero external dependencies for m
 
 ## How It Works — Feature Guide
 
-This section explains every major LogBridge feature in plain English, so you understand not just *what* it does but *why* it works that way.
+This section explains every major LogBridge feature, so you understand not just *what* it does but *why* it works that way.
 
 ---
 
