@@ -141,7 +141,10 @@ router.get('/:id/sample-fields', async (req, res) => {
     const docs = await os.sampleDocs(decryptRow(row), index_pattern, 1);
     if (!docs.length) return res.json({ fields: [] });
     const doc = docs[0];
-    const topLevel = Object.keys(doc).sort();
+    // runner.js injects _id and _index from the hit metadata (not in _source),
+    // so always include them so the user can exclude them from raw_data.
+    const topLevelSet = new Set(['_id', '_index', ...Object.keys(doc)]);
+    const topLevel = [...topLevelSet].sort();
     // If message field is a JSON string, also expose its sub-keys prefixed with "message."
     let messageSubFields = [];
     if (typeof doc.message === 'string') {
