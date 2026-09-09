@@ -142,11 +142,13 @@ router.get('/:id/sample-fields', async (req, res) => {
     try {
       docs = await os.sampleDocs(decryptRow(row), index_pattern, 1);
     } catch (e) {
-      // Index doesn't exist yet or no data — return empty field list rather than 400
-      if (e.message && (e.message.includes('404') || e.message.includes('index_not_found'))) {
-        return res.json({ fields: [], warning: 'No matching index found for this pattern' });
-      }
-      throw e;
+      const msg = e.message || '';
+      // Return a friendly empty result for any non-fatal error (index not found, empty, network blip)
+      // so the Field Exclusions UI degrades gracefully instead of showing HTTP 400.
+      const warning = msg.includes('404') || msg.includes('index_not_found')
+        ? 'No matching index found for this pattern'
+        : `Could not fetch sample: ${msg}`;
+      return res.json({ fields: [], warning });
     }
     if (!docs.length) return res.json({ fields: [], warning: 'Index exists but contains no documents' });
     const doc = docs[0];
