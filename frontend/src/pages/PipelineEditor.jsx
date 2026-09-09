@@ -16,6 +16,7 @@ const DEFAULT = {
   batch_mode: 'both', batch_size: 2000, batch_timeout_ms: 5000,
   dedup_enabled: true, dedup_field: 'raw_data', dedup_algo: 'md5',
   poll_interval_secs: 30, retry_count: 3, pause_on_fail: true,
+  timestamp_field: '@timestamp',
 };
 
 export default function PipelineEditor() {
@@ -684,6 +685,13 @@ export default function PipelineEditor() {
           </Section>
 
           <Section title="Schedule & Resilience">
+            <div className="mb-4">
+              <label className="label">Timestamp Field</label>
+              <input type="text" className="input w-full" value={form.timestamp_field}
+                onChange={e => set('timestamp_field', e.target.value)}
+                placeholder="@timestamp" />
+              <p className="text-xs text-slate-500 mt-1">OpenSearch field used for sorting and pagination. Default: <code>@timestamp</code>. Change to <code>timestamp</code> for Graylog-style indices.</p>
+            </div>
             <div className="grid grid-cols-3 gap-4">
               <div>
                 <label className="label">Poll Interval (sec)</label>

@@ -177,8 +177,9 @@ function transformDoc(doc, pipeline) {
       case 'md5':      val = hash('md5', String(getNested(doc, m.source_value) ?? '')); break;
       default:         val = null;
     }
-    // Objects/arrays get JSON-encoded so they land in a String column cleanly
-    if (val !== null && typeof val === 'object') val = JSON.stringify(val);
+    // Plain objects get JSON-encoded for String columns.
+    // Arrays are kept as-is so ClickHouse Array(String) columns receive a real JSON array.
+    if (val !== null && typeof val === 'object' && !Array.isArray(val)) val = JSON.stringify(val);
     // Omit missing/empty values so the column's ClickHouse DEFAULT applies.
     // (Sending "" to a DateTime/UInt column throws CANNOT_PARSE_DATETIME.)
     if (val === undefined || val === null || val === '') continue;
@@ -264,6 +265,8 @@ async function runPipelineOnce(conn, cluster, pipeline, opts = {}) {
   const _savePitId = hooks.savePitId || savePitId;
   const _commitCheckpoint = hooks.commitCheckpoint || commitCheckpoint;
 
+  const tsField = pipeline.timestamp_field || '@timestamp';
+
   let cursorTs = opts.startTs || null;
   let cursorId = opts.startId || null;
   let fetched = 0;
@@ -300,7 +303,7 @@ async function runPipelineOnce(conn, cluster, pipeline, opts = {}) {
     if (pitId) {
       try {
         const r = await withRetry(
-          () => os.fetchPageWithPit(conn, pitId, OS_PAGE_SIZE, cursorTs, cursorId, range),
+          () => os.fetchPageWithPit(conn, pitId, OS_PAGE_SIZE, cursorTs, cursorId, range, tsField),
           retryOpts
         );
         if (r.pitId && r.pitId !== pitId) { pitId = r.pitId; _savePitId(pipeline.id, pitId); }
@@ -312,7 +315,7 @@ async function runPipelineOnce(conn, cluster, pipeline, opts = {}) {
           const p = await withRetry(() => os.openPit(conn, pipeline.index_pattern), retryOpts);
           pitId = p.pitId; _savePitId(pipeline.id, pitId);
           const r = await withRetry(
-            () => os.fetchPageWithPit(conn, pitId, OS_PAGE_SIZE, cursorTs, cursorId, range),
+            () => os.fetchPageWithPit(conn, pitId, OS_PAGE_SIZE, cursorTs, cursorId, range, tsField),
             retryOpts
           );
           if (r.pitId && r.pitId !== pitId) { pitId = r.pitId; _savePitId(pipeline.id, pitId); }
@@ -324,7 +327,7 @@ async function runPipelineOnce(conn, cluster, pipeline, opts = {}) {
       }
     }
     return withRetry(
-      () => os.fetchPage(conn, pipeline.index_pattern, OS_PAGE_SIZE, cursorTs, cursorId, range),
+      () => os.fetchPage(conn, pipeline.index_pattern, OS_PAGE_SIZE, cursorTs, cursorId, range, tsField),
       retryOpts
     );
   }

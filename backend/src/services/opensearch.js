@@ -32,7 +32,7 @@ async function listIndices(conn) {
   return await res.json();
 }
 
-async function getIndexTimestamps(conn, indexPattern) {
+async function getIndexTimestamps(conn, indexPattern, tsField = '@timestamp') {
   // Get oldest timestamp
   const oldestRes = await fetch(`${conn.url}/${indexPattern}/_search`, {
     method: 'POST',
@@ -41,8 +41,8 @@ async function getIndexTimestamps(conn, indexPattern) {
     timeout: 15000,
     body: JSON.stringify({
       size: 1,
-      sort: [{ '@timestamp': 'asc' }],
-      _source: ['@timestamp'],
+      sort: [{ [tsField]: 'asc' }],
+      _source: [tsField],
     }),
   });
 
@@ -54,8 +54,8 @@ async function getIndexTimestamps(conn, indexPattern) {
     timeout: 15000,
     body: JSON.stringify({
       size: 1,
-      sort: [{ '@timestamp': 'desc' }],
-      _source: ['@timestamp'],
+      sort: [{ [tsField]: 'desc' }],
+      _source: [tsField],
     }),
   });
 
@@ -71,13 +71,13 @@ async function getIndexTimestamps(conn, indexPattern) {
   const count = await countRes.json();
 
   return {
-    oldest_ts: oldest.hits?.hits?.[0]?._source?.['@timestamp'] || null,
-    newest_ts: newest.hits?.hits?.[0]?._source?.['@timestamp'] || null,
+    oldest_ts: oldest.hits?.hits?.[0]?._source?.[tsField] || null,
+    newest_ts: newest.hits?.hits?.[0]?._source?.[tsField] || null,
     doc_count: count.count || 0,
   };
 }
 
-async function sampleDocs(conn, indexPattern, size = 5) {
+async function sampleDocs(conn, indexPattern, size = 5, tsField = '@timestamp') {
   const res = await fetch(`${conn.url}/${indexPattern}/_search`, {
     method: 'POST',
     headers: { Authorization: authHeader(conn), 'Content-Type': 'application/json' },
@@ -85,7 +85,7 @@ async function sampleDocs(conn, indexPattern, size = 5) {
     timeout: 15000,
     body: JSON.stringify({
       size,
-      sort: [{ '@timestamp': 'desc' }],
+      sort: [{ [tsField]: 'desc' }],
       query: { match_all: {} },
     }),
   });
@@ -94,21 +94,20 @@ async function sampleDocs(conn, indexPattern, size = 5) {
   return (body.hits?.hits || []).map(h => h._source);
 }
 
-async function fetchPage(conn, indexPattern, batchSize, cursorTs, cursorId, range = {}) {
-  // Build the @timestamp range filter from optional from/to plus the cursor.
+async function fetchPage(conn, indexPattern, batchSize, cursorTs, cursorId, range = {}, tsField = '@timestamp') {
   const tsRange = {};
   if (range.gte) tsRange.gte = range.gte;
   if (range.lte) tsRange.lte = range.lte;
-  if (cursorTs) tsRange.gt = cursorTs; // cursor always wins as the lower bound
+  if (cursorTs) tsRange.gt = cursorTs;
 
   const filters = [];
   if (Object.keys(tsRange).length > 0) {
-    filters.push({ range: { '@timestamp': tsRange } });
+    filters.push({ range: { [tsField]: tsRange } });
   }
 
   const query = {
     size: batchSize,
-    sort: [{ '@timestamp': 'asc' }, { _id: 'asc' }],
+    sort: [{ [tsField]: 'asc' }, { _id: 'asc' }],
     query: filters.length ? { bool: { filter: filters } } : { match_all: {} },
   };
 
@@ -136,7 +135,7 @@ async function fetchPage(conn, indexPattern, batchSize, cursorTs, cursorId, rang
 
   const last = hits[hits.length - 1];
   const nextCursor = {
-    ts: last._source?.['@timestamp'] || last.sort?.[0],
+    ts: last._source?.[tsField] || last.sort?.[0],
     id: last._id,
     index: last._index,
   };
@@ -193,7 +192,7 @@ async function closePit(conn, pitId) {
  * Throws with .pitExpired = true when the PIT has expired (404 / no_search_context).
  * The caller should recreate the PIT and resume from the last durable checkpoint.
  */
-async function fetchPageWithPit(conn, pitId, batchSize, cursorTs, cursorId, range = {}) {
+async function fetchPageWithPit(conn, pitId, batchSize, cursorTs, cursorId, range = {}, tsField = '@timestamp') {
   const tsRange = {};
   if (range.gte) tsRange.gte = range.gte;
   if (range.lte) tsRange.lte = range.lte;
@@ -201,14 +200,14 @@ async function fetchPageWithPit(conn, pitId, batchSize, cursorTs, cursorId, rang
 
   const filters = [];
   if (Object.keys(tsRange).length > 0) {
-    filters.push({ range: { '@timestamp': tsRange } });
+    filters.push({ range: { [tsField]: tsRange } });
   }
 
   const query = {
     size: batchSize,
     // When using PIT, omit the index from the URL — use pit.id instead.
     pit: { id: pitId, keep_alive: PIT_KEEP_ALIVE },
-    sort: [{ '@timestamp': 'asc' }, { _id: 'asc' }],
+    sort: [{ [tsField]: 'asc' }, { _id: 'asc' }],
     query: filters.length ? { bool: { filter: filters } } : { match_all: {} },
     // track_total_hits: false speeds up every page after the first
     track_total_hits: false,
@@ -254,7 +253,7 @@ async function fetchPageWithPit(conn, pitId, batchSize, cursorTs, cursorId, rang
 
   const last = hits[hits.length - 1];
   const nextCursor = {
-    ts: last._source?.['@timestamp'] || last.sort?.[0],
+    ts: last._source?.[tsField] || last.sort?.[0],
     id: last._id,
     index: last._index,
   };
@@ -266,12 +265,12 @@ async function fetchPageWithPit(conn, pitId, batchSize, cursorTs, cursorId, rang
   };
 }
 
-async function getIndexCount(conn, indexPattern, range = {}) {
+async function getIndexCount(conn, indexPattern, range = {}, tsField = '@timestamp') {
   const filters = [];
   const tsRange = {};
   if (range.gte) tsRange.gte = range.gte;
   if (range.lte) tsRange.lte = range.lte;
-  if (Object.keys(tsRange).length > 0) filters.push({ range: { '@timestamp': tsRange } });
+  if (Object.keys(tsRange).length > 0) filters.push({ range: { [tsField]: tsRange } });
 
   const body = filters.length ? { query: { bool: { filter: filters } } } : {};
   const res = await fetch(`${conn.url}/${indexPattern}/_count`, {
