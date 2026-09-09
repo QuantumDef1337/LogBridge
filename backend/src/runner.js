@@ -162,6 +162,36 @@ function hash(algo, str) {
   return crypto.createHash(algo === 'sha256' ? 'sha256' : 'md5').update(str).digest('hex');
 }
 
+// Immutably delete a dot-path from an object, e.g. ['agent', 'name'] removes obj.agent.name.
+function deleteNestedPath(obj, parts) {
+  if (!obj || typeof obj !== 'object' || parts.length === 0) return obj;
+  const copy = { ...obj };
+  if (parts.length === 1) {
+    delete copy[parts[0]];
+    return copy;
+  }
+  const key = parts[0];
+  if (key in copy) copy[key] = deleteNestedPath(copy[key], parts.slice(1));
+  return copy;
+}
+
+// Strip excluded_fields from a doc before JSON.stringify for raw_data.
+// Supports top-level keys ("_id") and dot-paths ("agent.name").
+function applyExclusions(doc, excludedFields) {
+  const topLevel = new Set();
+  const nested = [];
+  for (const f of excludedFields) {
+    const dot = f.indexOf('.');
+    if (dot === -1) topLevel.add(f);
+    else nested.push(f.split('.'));
+  }
+  let result = topLevel.size > 0
+    ? Object.fromEntries(Object.entries(doc).filter(([k]) => !topLevel.has(k)))
+    : { ...doc };
+  for (const parts of nested) result = deleteNestedPath(result, parts);
+  return result;
+}
+
 // Transform one OpenSearch doc into a ClickHouse row using the pipeline's field mappings.
 function transformDoc(doc, pipeline) {
   const row = {};
@@ -173,12 +203,9 @@ function transformDoc(doc, pipeline) {
       case 'field':    val = getNested(doc, m.source_value); break;
       case 'static':   val = m.source_value; break;
       case 'full_doc': {
-        const excluded = new Set(
-          Array.isArray(pipeline.excluded_fields) ? pipeline.excluded_fields : []
-        );
-        if (excluded.size > 0) {
-          const filtered = Object.fromEntries(Object.entries(doc).filter(([k]) => !excluded.has(k)));
-          val = JSON.stringify(filtered);
+        const excludedList = Array.isArray(pipeline.excluded_fields) ? pipeline.excluded_fields : [];
+        if (excludedList.length > 0) {
+          val = JSON.stringify(applyExclusions(doc, excludedList));
         } else {
           val = JSON.stringify(doc);
         }

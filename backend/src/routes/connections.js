@@ -141,21 +141,28 @@ router.get('/:id/sample-fields', async (req, res) => {
     const docs = await os.sampleDocs(decryptRow(row), index_pattern, 1);
     if (!docs.length) return res.json({ fields: [] });
     const doc = docs[0];
-    // runner.js injects _id and _index from the hit metadata (not in _source),
-    // so always include them so the user can exclude them from raw_data.
-    const topLevelSet = new Set(['_id', '_index', ...Object.keys(doc)]);
-    const topLevel = [...topLevelSet].sort();
-    // If message field is a JSON string, also expose its sub-keys prefixed with "message."
-    let messageSubFields = [];
-    if (typeof doc.message === 'string') {
-      try {
-        const parsed = JSON.parse(doc.message);
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          messageSubFields = Object.keys(parsed).map(k => `message.${k}`).sort();
+    const fieldSet = new Set(['_id', '_index']);
+    for (const [key, val] of Object.entries(doc)) {
+      fieldSet.add(key);
+      // One level of sub-fields for nested objects
+      if (val && typeof val === 'object' && !Array.isArray(val)) {
+        for (const subKey of Object.keys(val)) {
+          fieldSet.add(`${key}.${subKey}`);
         }
-      } catch {}
+      }
+      // If a field is a JSON string (e.g. Graylog message), expose its sub-keys too
+      if (typeof val === 'string') {
+        try {
+          const parsed = JSON.parse(val);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            for (const subKey of Object.keys(parsed)) {
+              fieldSet.add(`${key}.${subKey}`);
+            }
+          }
+        } catch {}
+      }
     }
-    res.json({ fields: [...topLevel, ...messageSubFields] });
+    res.json({ fields: [...fieldSet].sort() });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
