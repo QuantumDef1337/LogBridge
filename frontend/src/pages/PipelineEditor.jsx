@@ -234,6 +234,7 @@ export default function PipelineEditor() {
     try {
       const data = await api.getSampleFields(form.opensearch_connection_id, form.index_pattern);
       setAvailableFields(data.fields || []);
+      if (data.warning) setFieldsError(data.warning);
     } catch (e) {
       setFieldsError(e.message);
     } finally {

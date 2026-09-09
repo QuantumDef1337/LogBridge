@@ -138,8 +138,17 @@ router.get('/:id/sample-fields', async (req, res) => {
   const index_pattern = (req.query.index_pattern || '').trim();
   if (!index_pattern) return res.status(400).json({ error: 'index_pattern required' });
   try {
-    const docs = await os.sampleDocs(decryptRow(row), index_pattern, 1);
-    if (!docs.length) return res.json({ fields: [] });
+    let docs;
+    try {
+      docs = await os.sampleDocs(decryptRow(row), index_pattern, 1);
+    } catch (e) {
+      // Index doesn't exist yet or no data — return empty field list rather than 400
+      if (e.message && (e.message.includes('404') || e.message.includes('index_not_found'))) {
+        return res.json({ fields: [], warning: 'No matching index found for this pattern' });
+      }
+      throw e;
+    }
+    if (!docs.length) return res.json({ fields: [], warning: 'Index exists but contains no documents' });
     const doc = docs[0];
     const fieldSet = new Set(['_id', '_index']);
     for (const [key, val] of Object.entries(doc)) {
