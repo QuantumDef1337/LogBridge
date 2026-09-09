@@ -102,7 +102,7 @@ async function fetchPage(conn, indexPattern, batchSize, cursorTs, cursorId, rang
 
   const filters = [];
   if (Object.keys(tsRange).length > 0) {
-    filters.push({ range: { [tsField]: tsRange } });
+    filters.push({ range: { [tsField]: { ...tsRange, format: 'strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSS||yyyy-MM-dd' } } });
   }
 
   const query = {
