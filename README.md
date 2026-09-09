@@ -21,9 +21,10 @@ Built with Node.js 24, React 18, and SQLite — zero external dependencies for m
   - [Reconciliation](#10-reconciliation--verify-nothing-was-missed)
   - [Live Audit Feed](#11-live-audit-feed--watch-every-batch-in-real-time)
   - [Field Mappings](#12-field-mappings--shape-your-data)
-  - [Metrics](#13-metrics--real-time-throughput-tracking)
-  - [Dry-Run Test Mode](#14-dry-run-test-mode)
-  - [JWT Authentication & Credential Encryption](#15-jwt-authentication--credential-encryption)
+  - [Field Exclusions](#13-field-exclusions--strip-metadata-bloat-from-raw_data)
+  - [Metrics](#14-metrics--real-time-throughput-tracking)
+  - [Dry-Run Test Mode](#15-dry-run-test-mode)
+  - [JWT Authentication & Credential Encryption](#16-jwt-authentication--credential-encryption)
 - [Architecture](#architecture)
 - [Requirements](#requirements)
 - [Linux Installation (PM2)](#linux-installation-production--pm2)
@@ -248,7 +249,49 @@ These support both field-extraction (`source: field`) and static values (`source
 
 ---
 
-### 13. Metrics — Real-time throughput tracking
+### 13. Field Exclusions — Strip metadata bloat from `raw_data`
+
+When a log document is stored as `raw_data` (the full OpenSearch document serialised as JSON), it includes not just the useful log fields but also indexer metadata that bloat storage without adding analytical value.
+
+**Common offenders in Graylog / Wazuh pipelines:**
+
+| Field | What it is | Typical size |
+|---|---|---|
+| `gl2_*` fields | Graylog internal routing metadata | ~400 bytes each |
+| `streams` | Graylog stream IDs the message belongs to | ~100 bytes |
+| `message` | Raw syslog string — duplicated inside the structured JSON | ~200–800 bytes |
+| `_id` | OpenSearch document ID (already tracked separately) | ~35 bytes |
+| `_index` | Source index name (tracked in pipeline metadata) | ~40 bytes |
+
+**Measured impact:** A Graylog-enriched document averages **~3,677 bytes/row** without exclusions. Excluding `gl2_*`, `streams`, `_id`, `_index`, and `message` brings it to **~800 bytes/row** — a **78% reduction** that directly translates to lower ClickHouse storage.
+
+**How to configure:**
+
+1. Open a pipeline → **Step 4: Tagging & Batching** → scroll to **Field Exclusions**
+2. Click **"Fetch fields from sample doc"** — LogBridge queries 10 recent documents from OpenSearch and returns the union of all fields discovered, including:
+   - Top-level fields (`_id`, `_index`, `agent`, `decoder`, …)
+   - One level of nested sub-fields (`agent.name`, `predecoder.hostname`, …)
+   - Sub-keys of any JSON-string fields (e.g. `message.src_ip` for Graylog-wrapped FortiGate logs)
+3. Tick the fields to exclude. Use **"Select all gl2_*"** to instantly mark all Graylog metadata fields.
+4. Selected fields appear as removable tags above the checklist.
+5. Save the pipeline.
+
+**How exclusions are applied at ingest time:**
+
+When the runner fetches a batch from OpenSearch, each document's `raw_data` value is built by:
+
+```
+stripped_doc = doc - excluded_fields
+raw_data = JSON.stringify(stripped_doc)
+```
+
+Exclusions support both **top-level keys** (`_id`) and **dot-path sub-fields** (`agent.name`). Excluding a dot-path removes only that leaf — the parent object and sibling fields are preserved. The original document is not mutated — dedup hashing and DLQ logging still see the full unstripped document.
+
+> **Note:** Field exclusions only apply to mappings with **Source Type = Full Doc JSON**. Individually mapped fields (Source Type = Field) are unaffected.
+
+---
+
+### 14. Metrics — Real-time throughput tracking
 
 LogBridge tracks throughput over a **60-second sliding window**:
 
@@ -269,7 +312,7 @@ Additional counters tracked per pipeline:
 
 ---
 
-### 14. Dry-Run Test Mode
+### 15. Dry-Run Test Mode
 
 Before you start a pipeline for real, you can run a **dry run**:
 
@@ -282,7 +325,7 @@ Use this to verify your field mappings are correct and your ClickHouse schema ma
 
 ---
 
-### 15. JWT Authentication & Credential Encryption
+### 16. JWT Authentication & Credential Encryption
 
 **Authentication:**
 - LogBridge uses **JWT (JSON Web Tokens)** for API access
@@ -545,6 +588,7 @@ A full schema reference is in [`sql/wazuh_alerts_raw.sql`](sql/wazuh_alerts_raw.
    - Set batch size (default 20,000 — uses 2 × 10K OpenSearch pages per insert)
    - Set poll interval (how often to check for new logs, default 30 seconds)
    - Enable/disable deduplication and choose the hash algorithm
+   - Configure **Field Exclusions** — fetch fields from a sample doc and tick which ones to strip from `raw_data` before insert (reduces storage bloat from indexer metadata)
 4. **Test Run** — verify your field mappings with a dry run before going live
 5. **Start** the pipeline — monitor progress in **Jobs → Live Audit Feed**
 
