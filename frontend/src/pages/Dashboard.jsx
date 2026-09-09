@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { GitBranch, CheckCircle, PauseCircle, AlertCircle, Database, Activity, HardDrive, Timer, RefreshCw } from 'lucide-react';
 import { api } from '../api';
@@ -44,7 +44,10 @@ function fmtNum(n) {
 // Returns a shared hook so both cards read from one fetch.
 function useChTotals(pipelines) {
   const [totals, setTotals] = useState(null);
-  useEffect(() => {
+  // Key on last_success_at so we re-fetch whenever any pipeline completes a run
+  const runKey = pipelines.map(p => p.last_success_at || '').join(',');
+
+  const fetch = useCallback(() => {
     if (!pipelines.length) return;
     Promise.all(pipelines.map(p => api.getChStats(p.id).catch(() => null)))
       .then(results => {
@@ -57,7 +60,14 @@ function useChTotals(pipelines) {
         }
         setTotals({ compressed, uncompressed, rows });
       });
-  }, [pipelines.length]);
+  }, [runKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    fetch();
+    const t = setInterval(fetch, 30000);
+    return () => clearInterval(t);
+  }, [fetch]);
+
   return totals;
 }
 
