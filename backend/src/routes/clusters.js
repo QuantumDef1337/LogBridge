@@ -29,8 +29,8 @@ router.get('/:id', (req, res) => {
 
 router.post('/', (req, res) => {
   const { name, url, username, password, default_database } = req.body;
-  if (!name || !url || !username || !password)
-    return res.status(400).json({ error: 'name, url, username, password required' });
+  if (!name || !url || !username)
+    return res.status(400).json({ error: 'name, url, username required' });
   const r = getDb().prepare(
     'INSERT INTO clickhouse_clusters (name,url,username,password,default_database) VALUES (?,?,?,?,?)'
   ).run(name, url.replace(/\/$/, ''), username, encrypt(password), default_database || 'default');
