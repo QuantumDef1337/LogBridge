@@ -375,6 +375,7 @@ function parsePipeline(row) {
   try { row.excluded_fields = JSON.parse(row.excluded_fields || '[]'); } catch { row.excluded_fields = []; }
   row.schedule_lookback_hours = row.schedule_lookback_hours || 24;
   row.parallel_slices = Math.max(1, Math.min(row.parallel_slices || 1, 10));
+  row.max_run_minutes = Math.max(0, row.max_run_minutes || 0);
   return row;
 }
 

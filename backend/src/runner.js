@@ -598,6 +598,19 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
   };
   const cancelToken = opts.cancelToken || null; // scheduler passes this for pause support
 
+  // ── Max run time (deadline) ──────────────────────────────────────────────────
+  // Optional hard cap so a trigger can't run indefinitely. When the deadline passes,
+  // workers stop claiming (reusing the cancellation path), in-flight inserts finish,
+  // PITs close, and the finalizer throws WINDOW INCOMPLETE — the cursor is NOT advanced
+  // and the scheduler's normal auto-restart re-covers the window on the next trigger.
+  const maxRunMs = (opts.maxRunMinutes ?? pipeline.max_run_minutes ?? 0) > 0
+    ? (opts.maxRunMinutes ?? pipeline.max_run_minutes) * 60_000
+    : 0;
+  const deadlineAt = maxRunMs ? Date.now() + maxRunMs : 0;
+  const deadlineHit = () => deadlineAt !== 0 && Date.now() >= deadlineAt;
+  // A pause/shutdown (cancelToken) OR the deadline both stop workers via the same path.
+  const stopRequested = () => (cancelToken?.cancelled === true) || deadlineHit();
+
   // ── Compute time window ──────────────────────────────────────────────────────
   const to = opts.to || new Date();
   let from;
@@ -749,7 +762,7 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
     let pitId = (await os.openPit(conn, target)).pitId;
     try {
       while (true) {
-        if (cancelToken?.cancelled) throw RUN_CANCELLED;
+        if (stopRequested()) throw RUN_CANCELLED; // pause/shutdown or deadline
         const cycleStart = Date.now();
         let page;
         try {
@@ -802,7 +815,7 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
   // A worker coroutine: pull chunks until the queue is drained AND nothing is in flight.
   async function worker(workerId) {
     while (true) {
-      if (cancelToken?.cancelled) return;
+      if (stopRequested()) return; // stop claiming on pause/shutdown or deadline
       const chunk = claimNext();
       if (!chunk) {
         if (inProgress === 0) return;      // queue empty and nobody can requeue → done
@@ -859,9 +872,19 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
     return { ...totals, from, to, chunks: chunks.length, complete: completeCount, failed: failed.length, cancelled: true };
   }
 
-  // Incomplete: some chunk failed after all retries/redistributions. Do NOT advance the
-  // cursor. Throw so the scheduler marks the run errored and re-covers the window later.
+  // Incomplete: either a chunk failed after all retries/redistributions, OR the max run
+  // time was reached with chunks still outstanding. Either way, do NOT advance the cursor;
+  // throw so the scheduler marks the run errored and re-covers the window on the next
+  // trigger (already-ingested chunks are dedup-skipped). Completion wins over the deadline:
+  // if every chunk finished (failed.length === 0) we fall through to the cursor advance
+  // below even when the deadline elapsed at the very end.
   if (failed.length > 0) {
+    if (deadlineHit()) {
+      pipelineLog(pipeline.id, 'warn',
+        `Run stopped — max run time (${Math.round(maxRunMs / 60000)} min) reached with ${completeCount}/${chunks.length} chunk(s) complete. ` +
+        `Cursor NOT advanced; next trigger re-covers [${from.toISOString()} → ${to.toISOString()}] and dedup-skips what already landed.`);
+      throw new Error(`Scheduled window incomplete: max run time reached (${completeCount}/${chunks.length} chunks complete)`);
+    }
     pipelineLog(pipeline.id, 'error',
       `Scheduled window INCOMPLETE — ${completeCount}/${chunks.length} chunk(s) complete, ${failed.length} failed. ` +
       `Cursor NOT advanced; next trigger re-covers [${from.toISOString()} → ${to.toISOString()}].`);

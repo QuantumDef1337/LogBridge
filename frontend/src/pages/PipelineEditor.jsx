@@ -47,6 +47,30 @@ function scheduleExample(cron, lookback) {
   return `At each trigger, pulls the ${lookback}h window ending at trigger time`;
 }
 
+// Optional per-run time budget. 0 = unlimited. When the deadline is reached the run
+// stops claiming chunks, lets in-flight inserts finish, and leaves the cursor unchanged
+// so the next trigger safely re-covers the window (dedup skips what already landed).
+function MaxRunTimeField({ form, set }) {
+  const v = form.max_run_minutes || 0;
+  return (
+    <div>
+      <label className="label">
+        Max run time <span className="text-slate-500">(minutes — 0 = unlimited)</span>
+      </label>
+      <input
+        type="number" min={0} step={1} value={v}
+        onChange={e => set('max_run_minutes', Math.max(0, Math.floor(+e.target.value || 0)))}
+        className="input w-32"
+      />
+      <p className="text-xs text-slate-500 mt-1">
+        {v > 0
+          ? `A trigger runs at most ${v} min. If it can't finish the window in time, the cursor is left unchanged and the next trigger resumes it — no data loss, no duplicates.`
+          : 'No time limit — a trigger runs until the whole window is complete or a chunk is unrecoverable.'}
+      </p>
+    </div>
+  );
+}
+
 const DEFAULT = {
   name: '', description: '', status: 'paused',
   opensearch_connection_id: '', index_pattern: '', index_set_filter: [],
@@ -63,6 +87,7 @@ const DEFAULT = {
   schedule_cron: '0 0 * * *',
   schedule_lookback_hours: 24,
   parallel_slices: 1,
+  max_run_minutes: 0,
 };
 
 export default function PipelineEditor() {
@@ -569,6 +594,7 @@ export default function PipelineEditor() {
                           Parallel mode pulls the full date range in one shot, then auto-pauses. If interrupted, dedup ensures no duplicates on restart.
                         </div>
                       )}
+                      <MaxRunTimeField form={form} set={set} />
                     </div>
                   )}
                 </div>
@@ -677,6 +703,7 @@ export default function PipelineEditor() {
                       <strong className="text-slate-400">Works for any index — single-shard or multi-shard.</strong>{' '}
                       Use 1 for low volumes; 4–8 for high-volume indexes (&gt;500k docs/day).
                     </p>
+                    <div className="mt-3"><MaxRunTimeField form={form} set={set} /></div>
                   </div>
 
                   {/* ── Run Now button (only for saved pipelines) ── */}

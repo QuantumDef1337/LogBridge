@@ -159,6 +159,15 @@ one trigger complete an entire window with dynamic load balancing:
 > routing keeps this small in normal operation. PIT contexts are closed as each chunk finishes;
 > a hard process kill can leave contexts open until their 5-minute keep-alive expires.
 
+**Max run time** (`max_run_minutes`, optional; 0 = unlimited): a per-trigger time budget so a run
+can't overrun indefinitely. When the deadline is reached the run stops claiming new chunks, lets any
+in-flight ClickHouse insert finish, closes its PITs, and reports `WINDOW INCOMPLETE` **without
+advancing the cursor** — so the next trigger safely re-covers the window and dedup-skips whatever
+already landed. It reuses the same cancellation path as a pause, so recovery is identical. A pipeline
+also can't run twice concurrently: the scheduler holds one execution token per pipeline for the whole
+run (including its post-failure backoff), so a new trigger is skipped until the previous run fully
+unwinds.
+
 **Data-safety guarantee:** a partial fetch (`timed_out`, shard failures, or fewer docs than OpenSearch
 reported) **aborts loudly instead of being treated as "done,"** and the cursor is never advanced past
 an incomplete window. Combined with `event_id` [deduplication](#7-deduplication--no-duplicate-rows-in-clickhouse)

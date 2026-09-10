@@ -218,6 +218,7 @@ function initSchema() {
   addColumnIfMissing('pipelines', 'schedule_cron', 'TEXT');
   addColumnIfMissing('pipelines', 'schedule_lookback_hours', 'INTEGER DEFAULT 24');
   addColumnIfMissing('pipelines', 'parallel_slices', 'INTEGER DEFAULT 1');
+  addColumnIfMissing('pipelines', 'max_run_minutes', 'INTEGER DEFAULT 0'); // 0 = no time limit
 
   // Seed default admin user
   const userCount = db.prepare('SELECT COUNT(*) as c FROM users').get();

@@ -20,7 +20,7 @@ const PIPELINE_FIELDS = `
   p.dedup_enabled, p.dedup_field, p.dedup_algo,
   p.poll_interval_secs, p.retry_count, p.pause_on_fail, p.timestamp_field,
   p.excluded_fields,
-  p.schedule_cron, p.schedule_lookback_hours, p.parallel_slices,
+  p.schedule_cron, p.schedule_lookback_hours, p.parallel_slices, p.max_run_minutes,
   p.created_at, p.updated_at,
   ps.status as run_status, ps.last_run_at, ps.last_success_at, ps.last_error,
   ps.rows_inserted_total, ps.rows_inserted_today, ps.rows_inserted_week,
@@ -72,8 +72,8 @@ router.post('/', (req, res) => {
       batch_mode, batch_size, batch_timeout_ms,
       dedup_enabled, dedup_field, dedup_algo,
       poll_interval_secs, retry_count, pause_on_fail, timestamp_field, excluded_fields,
-      schedule_cron, schedule_lookback_hours, parallel_slices
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      schedule_cron, schedule_lookback_hours, parallel_slices, max_run_minutes
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).run(
     p.name, p.description || '', 'paused',
     p.opensearch_connection_id || null, p.index_pattern || '', JSON.stringify(p.index_set_filter || []),
@@ -87,7 +87,8 @@ router.post('/', (req, res) => {
     p.poll_interval_secs || 30, p.retry_count || 3, p.pause_on_fail !== false ? 1 : 0,
     p.timestamp_field || '@timestamp',
     JSON.stringify(p.excluded_fields || []),
-    p.schedule_cron || null, p.schedule_lookback_hours || 24, p.parallel_slices || 1
+    p.schedule_cron || null, p.schedule_lookback_hours || 24, p.parallel_slices || 1,
+    p.max_run_minutes || 0
   );
 
   // Create initial status row
@@ -112,7 +113,7 @@ router.put('/:id', (req, res) => {
       batch_mode=?, batch_size=?, batch_timeout_ms=?,
       dedup_enabled=?, dedup_field=?, dedup_algo=?,
       poll_interval_secs=?, retry_count=?, pause_on_fail=?, timestamp_field=?, excluded_fields=?,
-      schedule_cron=?, schedule_lookback_hours=?, parallel_slices=?,
+      schedule_cron=?, schedule_lookback_hours=?, parallel_slices=?, max_run_minutes=?,
       updated_at=datetime('now')
     WHERE id=?
   `).run(
@@ -128,6 +129,7 @@ router.put('/:id', (req, res) => {
     p.timestamp_field || '@timestamp',
     JSON.stringify(typeof p.excluded_fields === 'string' ? JSON.parse(p.excluded_fields) : p.excluded_fields || []),
     p.schedule_cron || null, p.schedule_lookback_hours || 24, p.parallel_slices || 1,
+    p.max_run_minutes || 0,
     req.params.id
   );
   audit.info('pipeline', `Pipeline updated: "${p.name}"`, parseInt(req.params.id));
@@ -497,6 +499,7 @@ function parsePipeline(row) {
   try { row.excluded_fields = JSON.parse(row.excluded_fields || '[]'); } catch { row.excluded_fields = []; }
   row.schedule_lookback_hours = row.schedule_lookback_hours || 24;
   row.parallel_slices = row.parallel_slices || 1;
+  row.max_run_minutes = row.max_run_minutes || 0;
   return row;
 }
 
