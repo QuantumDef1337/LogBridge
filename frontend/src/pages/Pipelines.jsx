@@ -567,6 +567,11 @@ function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRun
                   </span>
                 )}
                 {pct != null && <span className="text-slate-500">({pct}% ingested)</span>}
+                {!isExcess && remaining > 0 && (
+                  recon.eta_seconds != null
+                    ? <span className="text-brand-400" title={`at ~${recon.eta_rate?.toLocaleString()} rows/sec net`}>ETA ~{fmtEtaSecs(recon.eta_seconds)}</span>
+                    : <span className="text-slate-600">ETA calculating…</span>
+                )}
               </div>
               {(recon.source || recon.dest) && (
                 <div className="grid grid-cols-2 gap-2 text-[10px] text-slate-500">
@@ -594,6 +599,15 @@ function fmtLag(secs) {
   if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
   if (secs < 86400) return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
   return `${Math.floor(secs / 86400)}d ${Math.floor((secs % 86400) / 3600)}h`;
+}
+
+// Compact ETA from a second count: "3h 28m" / "45m" / "2m 10s" / "40s".
+function fmtEtaSecs(secs) {
+  if (secs == null || !isFinite(secs) || secs < 0) return '—';
+  if (secs < 60) return `${Math.round(secs)}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ${Math.round(secs % 60)}s`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ${Math.round((secs % 3600) / 60)}m`;
+  return `${Math.floor(secs / 86400)}d ${Math.round((secs % 86400) / 3600)}h`;
 }
 
 function fmtDuration(ms) {
@@ -911,6 +925,8 @@ export default function Pipelines() {
   const expandedRef = useRef(expanded);
   const listRef     = useRef(list);
   const reconRef    = useRef(reconcilingId);
+  // Per-pipeline history of reconciliation snapshots, for ETA via ingested-count delta.
+  const reconHistoryRef = useRef({}); // { [pipelineId]: [{ ingested, at }, …] }
   useEffect(() => { expandedRef.current = expanded; }, [expanded]);
   useEffect(() => { listRef.current = list; }, [list]);
   useEffect(() => { reconRef.current = reconcilingId; }, [reconcilingId]);
@@ -938,6 +954,30 @@ export default function Pipelines() {
     try {
       // Backend derives the comparison window from the pipeline's pull mode.
       const r = await api.reconcile(p.id);
+
+      // ── ETA via reconciliation delta ─────────────────────────────────────────
+      // Rate = (ingested_now − ingested_earlier) / elapsed, using a short history so
+      // one noisy 30s sample doesn't swing the estimate. ETA = remaining / rate.
+      const ingested = r?.dest?.count ?? r?.indexes?.[0]?.dest_count;
+      const remaining = r?.remaining;
+      if (ingested != null && remaining != null && remaining > 0) {
+        const now = Date.now();
+        const hist = (reconHistoryRef.current[p.id] || []).concat([{ ingested, at: now }]);
+        // Keep the last ~5 minutes of samples (≈10 at the 30s cadence).
+        const trimmed = hist.filter(h => now - h.at <= 5 * 60 * 1000).slice(-12);
+        reconHistoryRef.current[p.id] = trimmed;
+        const oldest = trimmed[0];
+        const elapsedSec = (now - oldest.at) / 1000;
+        const gained = ingested - oldest.ingested;
+        if (elapsedSec >= 15 && gained > 0) {
+          const rate = gained / elapsedSec;           // rows/sec (net progress)
+          r.eta_seconds = Math.round(remaining / rate);
+          r.eta_rate = Math.round(rate);
+        }
+      } else if (remaining === 0) {
+        reconHistoryRef.current[p.id] = []; // done — reset so a new run starts fresh
+      }
+
       setReconcileResult(s => ({ ...s, [p.id]: r }));
     } catch (e) {
       setReconcileResult(s => ({ ...s, [p.id]: { ok: false, error: e.message } }));
