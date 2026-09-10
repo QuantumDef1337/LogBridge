@@ -367,6 +367,8 @@ async function ingestChunk(chunk, pipeline, conn, cluster, opts) {
 
       cursorTs = page.nextCursor.ts;
       cursorId = page.nextCursor.id;
+      // Send cursor back to main thread so it can resume from here on redistribution.
+      parentPort.postMessage({ type: 'CURSOR_UPDATE', chunkId: chunk.id, cursorTs, cursorId });
       progress(chunk.id, fetched, inserted);
     }
   } finally {

@@ -89,7 +89,15 @@ class WorkerPool {
         h.metricsRecord(msg.inserted, msg.bytes);
         break;
 
+      case 'CURSOR_UPDATE':
+        // Keep the chunk's resume cursor current so redistribution re-starts from
+        // the last safely-inserted page, not the beginning of the chunk.
+        h.onCursorUpdate(msg.chunkId, msg.cursorTs, msg.cursorId);
+        break;
+
       case 'PROGRESS':
+        // Display-only update — does not affect chunk inserted/fetched totals
+        // (those come from CHUNK_COMPLETE to avoid double-counting).
         h.onProgress(msg.chunkId, msg.fetched, msg.inserted);
         break;
 

@@ -733,10 +733,15 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
       pipelineLog: (level, message) => pipelineLog(pipeline.id, level, message),
       toDlq: (docs, err) => toDlq(pipeline.id, docs, err),
       metricsRecord: (inserted, bytes) => metrics.recordIngestion(inserted, bytes),
-      onProgress: (chunkId, fetched, inserted) => {
+      onCursorUpdate: (chunkId, cursorTs, cursorId) => {
+        // Keep the chunk's durable cursor current so redistribution resumes from
+        // the last safely-inserted page, not the start of the chunk.
         const chunk = chunks[chunkId];
-        if (chunk) { chunk.fetched = fetched; chunk.inserted = inserted; }
-        // Update worker progress display
+        if (chunk) { chunk.cursorTs = cursorTs; chunk.cursorId = cursorId; }
+      },
+      onProgress: (chunkId, fetched, inserted) => {
+        // Display-only: update the worker status label in the UI progress view.
+        // Chunk totals are applied only on CHUNK_COMPLETE to avoid double-counting.
         for (const w of prog.workers) {
           if (w.current_chunk === chunkId) { w.status = 'PROCESSING'; }
         }
