@@ -5,6 +5,7 @@ const { getDb } = require('./db');
 const { withRetry, sleep } = require('./retry');
 const metrics = require('./services/metrics');
 const progress = require('./progress');
+const WorkerPool = require('./workerPool');
 
 // Save the active PIT id so it survives across pages within one run.
 function savePitId(pipelineId, pitId) {
@@ -710,188 +711,101 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
   };
   progress.start(pipeline.id, prog);
 
-  // Shared queue of chunk ids. claim = shift (synchronous → exclusive, no locks).
-  const queue = chunks.map(c => c.id);
-  let inProgress = 0;
+  // ── Worker Thread Pool ────────────────────────────────────────────────────────
+  // Each chunk runs in its own OS thread. The main thread coordinates: it submits
+  // chunks to the pool and handles SQLite writes (LOG, DLQ, METRICS, PROGRESS)
+  // via message callbacks — worker threads have no SQLite access.
 
-  function claimNext() {
-    while (queue.length) {
-      const c = chunks[queue.shift()];
-      if (c.state === 'PENDING') { c.state = 'IN_PROGRESS'; inProgress++; return c; }
+  const pool = new WorkerPool(
+    workerCount,
+    {
+      conn,
+      cluster,
+      pipeline,
+      opts: {
+        batchSize,
+        tsField,
+        inPlaceRetries,
+        insertRetryOpts,
+      },
+    },
+    {
+      pipelineLog: (level, message) => pipelineLog(pipeline.id, level, message),
+      toDlq: (docs, err) => toDlq(pipeline.id, docs, err),
+      metricsRecord: (inserted, bytes) => metrics.recordIngestion(inserted, bytes),
+      onProgress: (chunkId, fetched, inserted) => {
+        const chunk = chunks[chunkId];
+        if (chunk) { chunk.fetched = fetched; chunk.inserted = inserted; }
+        // Update worker progress display
+        for (const w of prog.workers) {
+          if (w.current_chunk === chunkId) { w.status = 'PROCESSING'; }
+        }
+      },
     }
-    return null;
-  }
+  );
 
-  // Dedup + insert one batch of transformed rows; updates chunk stats and logs throughput.
-  async function flushChunkBatch(workerId, chunk, rows, cycleStart) {
-    if (!rows.length) return;
-    let insertRows = rows;
-    const eventIds = rows.map(r => r.event_id).filter(Boolean);
-    if (eventIds.length > 0) {
-      try {
-        const existing = await ch.getExistingEventIds(
-          cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, eventIds
-        );
-        if (existing.length > 0) {
-          const existingSet = new Set(existing);
-          insertRows = rows.filter(r => !r.event_id || !existingSet.has(r.event_id));
-          chunk.skipped += rows.length - insertRows.length;
-        }
-      } catch (e) {
-        if (e.dedupUnsupported && !dedupWarned) {
-          dedupWarned = true;
-          pipelineLog(pipeline.id, 'warn', e.message);
-        } else if (e.dedupFallback) {
-          // Transient ClickHouse error after retries — log once per chunk, insert without dedup.
-          pipelineLog(pipeline.id, 'warn', e.message);
-        } else if (!e.dedupUnsupported) {
-          throw e;
-        }
-        // dedup unsupported / fallback → insert without a dedup check
+  // Stop the pool when a pause/deadline is requested.
+  const stopWatcher = setInterval(() => {
+    if (stopRequested()) pool.requestStop();
+  }, 200);
+
+  // Submit all chunks and collect results. The pool queues excess chunks until
+  // a thread frees up — no busy-waiting or polling needed.
+  const chunkPromises = chunks.map((chunk, i) => {
+    const w = prog.workers[i % workerCount];
+    chunk.state = 'IN_PROGRESS';
+    w.current_chunk = chunk.id;
+    w.current_range = { gte: chunk.gte, end: chunk.lt || chunk.lte };
+    w.status = 'PROCESSING';
+    return pool.process(chunk).then(({ ok, result, cancelled, failed }) => {
+      if (cancelled) {
+        // Leave chunk state as-is; finalization detects the cancelled run.
+        return;
       }
-    }
-    if (!insertRows.length) return;
-    const ndjson = insertRows.map(r => JSON.stringify(r)).join('\n');
-    const insertStart = Date.now();
-    await withRetry(
-      () => ch.insertRows(cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, ndjson),
-      insertRetryOpts
-    );
-    const now = Date.now();
-    chunk.inserted += insertRows.length;
-    metrics.recordIngestion(insertRows.length, Buffer.byteLength(ndjson, 'utf8'));
-
-    const cycleMs = Math.max(1, now - cycleStart);
-    const insertMs = Math.max(1, now - insertStart);
-    const cycleRate = Math.round(insertRows.length / (cycleMs / 1000));
-    const insertRate = Math.round(insertRows.length / (insertMs / 1000));
-    pipelineLog(pipeline.id, 'info',
-      `[worker-${workerId}] chunk ${chunk.id}: inserted ${insertRows.length} rows in ${(cycleMs / 1000).toFixed(1)}s ` +
-      `(${cycleRate.toLocaleString()} rows/sec · insert ${insertRate.toLocaleString()}/s) (skipped ${chunk.skipped} dedup)`
-    );
-  }
-
-  // Ingest one chunk to completion via PIT + search_after, resuming from its durable
-  // cursor (so an in-place retry or a redistribution re-reads only what wasn't flushed).
-  async function ingestChunk(workerId, chunk) {
-    const range = { gte: chunk.gte };
-    if (chunk.lt) range.lt = chunk.lt; else range.lte = chunk.lte;
-
-    // Index-aware routing: [] means no index overlaps this chunk's window → provably no
-    // data, complete instantly without opening any context. null means routing was
-    // unavailable → fall back to the full pattern. Otherwise open the PIT on just the
-    // relevant indices, keeping shard/context fan-out tiny.
-    if (Array.isArray(chunk.indices) && chunk.indices.length === 0) return;
-    const target = Array.isArray(chunk.indices) && chunk.indices.length
-      ? chunk.indices.join(',')
-      : pipeline.index_pattern;
-
-    let pitId = (await os.openPit(conn, target)).pitId;
-    try {
-      while (true) {
-        if (stopRequested()) throw RUN_CANCELLED; // pause/shutdown or deadline
-        const cycleStart = Date.now();
-        let page;
-        try {
-          page = await os.fetchPageWithPit(conn, pitId, batchSize, chunk.cursorTs, chunk.cursorId, range, tsField);
-        } catch (e) {
-          if (e.pitExpired) { // PIT aged out — recreate on the SAME routed target, resume from cursor
-            await os.closePit(conn, pitId).catch(() => {});
-            pitId = (await os.openPit(conn, target)).pitId;
-            continue;
-          }
-          throw e;
-        }
-        pitId = page.pitId;
-        if (!page.docs.length) break;
-
-        const rows = [];
-        for (const d of page.docs) {
-          try { rows.push(transformDoc(d, pipeline)); }
-          catch (e) { toDlq(pipeline.id, [d], { message: e.message, category: 'transform' }); chunk.dlq++; }
-        }
-        chunk.fetched += page.docs.length;
-        await flushChunkBatch(workerId, chunk, rows, cycleStart);
-        // Advance the durable cursor ONLY after the page's rows are safely inserted.
-        chunk.cursorTs = page.nextCursor.ts;
-        chunk.cursorId = page.nextCursor.id;
-      }
-    } finally {
-      await os.closePit(conn, pitId).catch(() => {});
-    }
-  }
-
-  // One chunk, with in-place retries. Returns true on COMPLETE, false on exhausted retries.
-  async function processChunk(workerId, chunk) {
-    const w = prog.workers[workerId];
-    for (let attempt = 0; attempt <= inPlaceRetries; attempt++) {
-      try {
-        w.status = attempt === 0 ? 'PROCESSING' : 'RETRYING';
-        await ingestChunk(workerId, chunk);
-        chunk.state = 'COMPLETE';
-        return true;
-      } catch (e) {
-        if (e === RUN_CANCELLED) throw e; // pause — unwind, don't retry
-        w.retries++;
-        pipelineLog(pipeline.id, 'warn',
-          `[worker-${workerId}] chunk ${chunk.id} attempt ${attempt + 1}/${inPlaceRetries + 1} failed: ${String(e.message).slice(0, 160)}`
-        );
-        if (attempt < inPlaceRetries) { w.status = 'RETRYING'; await sleep(Math.min(30000, 1000 * 2 ** attempt)); }
-      }
-    }
-    return false;
-  }
-
-  // A worker coroutine: pull chunks until the queue is drained AND nothing is in flight.
-  async function worker(workerId) {
-    const w = prog.workers[workerId];
-    while (true) {
-      if (stopRequested()) { w.status = 'IDLE'; w.current_chunk = null; w.current_range = null; return; }
-      const chunk = claimNext();
-      if (!chunk) {
-        w.status = 'IDLE'; w.current_chunk = null; w.current_range = null;
-        if (inProgress === 0) return;      // queue empty and nobody can requeue → done
-        await sleep(200);                  // others still working (may requeue) → wait
-        continue;
-      }
-      w.status = 'PROCESSING';
-      w.current_chunk = chunk.id;
-      w.current_range = { gte: chunk.gte, end: chunk.lt || chunk.lte };
-      try {
-        const ok = await processChunk(workerId, chunk);
-        if (ok) w.completed++;
-        if (!ok) {
-          if (chunk.redistributions < MAX_REDISTRIBUTIONS) {
-            chunk.redistributions++;
-            chunk.state = 'PENDING';       // hand back to the pool for another worker
-            queue.push(chunk.id);
-            pipelineLog(pipeline.id, 'warn',
-              `[worker-${workerId}] chunk ${chunk.id} requeued for redistribution (${chunk.redistributions}/${MAX_REDISTRIBUTIONS})`);
-          } else {
-            chunk.state = 'FAILED';
-            pipelineLog(pipeline.id, 'error',
-              `chunk ${chunk.id} [${chunk.gte} → ${chunk.lt || chunk.lte}] FAILED permanently after ${chunk.redistributions} redistribution(s)`);
-          }
-        }
-      } catch (e) {
-        if (e === RUN_CANCELLED) return;   // pause — stop claiming
-        // Unexpected error escaping processChunk — treat like an exhausted attempt.
+      if (ok && result) {
+        chunk.state   = 'COMPLETE';
+        chunk.fetched  += result.fetched;
+        chunk.inserted += result.inserted;
+        chunk.skipped  += result.skipped;
+        chunk.dlq      += result.dlq;
+        w.completed++;
+        w.status = 'IDLE';
+        w.current_chunk = null;
+      } else {
+        // Failed after all in-place retries — try redistribution.
         if (chunk.redistributions < MAX_REDISTRIBUTIONS) {
           chunk.redistributions++;
           chunk.state = 'PENDING';
-          queue.push(chunk.id);
+          pipelineLog(pipeline.id, 'warn',
+            `chunk ${chunk.id} requeued for redistribution (${chunk.redistributions}/${MAX_REDISTRIBUTIONS})`);
+          return pool.process(chunk).then(({ ok: ok2, result: r2 }) => {
+            if (ok2 && r2) {
+              chunk.state    = 'COMPLETE';
+              chunk.fetched  += r2.fetched;
+              chunk.inserted += r2.inserted;
+              chunk.skipped  += r2.skipped;
+              chunk.dlq      += r2.dlq;
+              w.completed++;
+            } else {
+              chunk.state = 'FAILED';
+              pipelineLog(pipeline.id, 'error',
+                `chunk ${chunk.id} [${chunk.gte} → ${chunk.lt || chunk.lte}] FAILED permanently after redistribution`);
+            }
+            w.status = 'IDLE'; w.current_chunk = null;
+          });
         } else {
           chunk.state = 'FAILED';
-          pipelineLog(pipeline.id, 'error', `chunk ${chunk.id} FAILED: ${String(e.message).slice(0, 160)}`);
+          pipelineLog(pipeline.id, 'error',
+            `chunk ${chunk.id} [${chunk.gte} → ${chunk.lt || chunk.lte}] FAILED permanently after ${chunk.redistributions} redistribution(s)`);
+          w.status = 'IDLE'; w.current_chunk = null;
         }
-      } finally {
-        inProgress--;                      // no longer in flight (completed / requeued / failed)
       }
-    }
-  }
+    });
+  });
 
-  // ── Run the worker pool ───────────────────────────────────────────────────────
-  await Promise.all(Array.from({ length: workerCount }, (_, i) => worker(i)));
+  await Promise.all(chunkPromises);
+  clearInterval(stopWatcher);
+  await pool.terminate();
 
   // ── Centralized finalization: inspect EVERY chunk, then decide on the cursor ──
   const totals = chunks.reduce(
