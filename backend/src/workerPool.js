@@ -37,6 +37,15 @@ class WorkerPool {
     this._stopBuf  = new SharedArrayBuffer(4);
     this._stopFlag = new Int32Array(this._stopBuf);
 
+    // PIT semaphore — limits concurrent OpenSearch PIT opens across ALL threads.
+    // Without this, all N threads open PITs simultaneously, hitting OpenSearch's
+    // max_open_scroll_context limit (default 500) and getting 429 errors.
+    // Each thread acquires one slot before openPit() and releases it after.
+    const maxConcurrentPits = sharedOpts.opts.maxConcurrentPits || Math.max(1, Math.floor(size / 2));
+    this._pitSemBuf  = new SharedArrayBuffer(4);
+    this._pitSem     = new Int32Array(this._pitSemBuf);
+    Atomics.store(this._pitSem, 0, maxConcurrentPits);
+
     this._threads = [];
     for (let i = 0; i < size; i++) {
       this._threads.push(this._spawnThread(i, sharedOpts));
@@ -55,6 +64,7 @@ class WorkerPool {
       workerData: {
         workerId,
         stopFlag: this._stopFlag,  // shared memory stop signal
+        pitSem:   this._pitSem,    // PIT open semaphore (cross-thread atomic)
         conn:     sharedOpts.conn,
         cluster:  sharedOpts.cluster,
         pipeline: sharedOpts.pipeline,

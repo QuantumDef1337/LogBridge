@@ -73,6 +73,25 @@ async function withRetry(fn, opts = {}) {
   }
 }
 
+// ── PIT semaphore helpers ─────────────────────────────────────────────────────
+// Prevents all threads from opening PITs simultaneously, which would exceed
+// OpenSearch's max_open_scroll_context limit and cause 429 rejections.
+
+async function acquirePitSlot() {
+  const sem = workerData.pitSem;
+  if (!sem) return; // no semaphore configured — proceed without throttling
+  while (true) {
+    const cur = Atomics.load(sem, 0);
+    if (cur > 0 && Atomics.compareExchange(sem, 0, cur, cur - 1) === cur) return;
+    await sleep(100 + Math.random() * 100); // brief wait + jitter before retry
+  }
+}
+
+function releasePitSlot() {
+  const sem = workerData.pitSem;
+  if (sem) Atomics.add(sem, 0, 1);
+}
+
 // ── OpenSearch helpers ────────────────────────────────────────────────────────
 
 async function openPit(conn, indexPattern, keepAlive = '5m') {
@@ -285,7 +304,13 @@ async function ingestChunk(chunk, pipeline, conn, cluster, opts) {
     ? chunk.indices.join(',')
     : pipeline.index_pattern;
 
-  let pitId = await openPit(conn, target);
+  await acquirePitSlot();
+  let pitId;
+  try {
+    pitId = await openPit(conn, target);
+  } finally {
+    releasePitSlot();
+  }
   let fetched = 0, inserted = 0, skipped = 0, dlqCount = 0;
   let dedupFallbackLogged = false;
 
@@ -295,7 +320,7 @@ async function ingestChunk(chunk, pipeline, conn, cluster, opts) {
 
     while (true) {
       // Check stop signal from main thread
-      if (workerData.stopFlag?.value === 1) throw new Error('RUN_CANCELLED');
+      if (Atomics.load(workerData.stopFlag, 0) === 1) throw new Error('RUN_CANCELLED');
 
       const cycleStart = Date.now();
       let page;
@@ -304,8 +329,9 @@ async function ingestChunk(chunk, pipeline, conn, cluster, opts) {
       } catch (e) {
         if (e.pitExpired) {
           await closePit(conn, pitId).catch(() => {});
-          pitId = await openPit(conn, target);
-          page  = await fetchPage(conn, pitId, batchSize, cursorTs, cursorId, range, tsField);
+          await acquirePitSlot();
+          try { pitId = await openPit(conn, target); } finally { releasePitSlot(); }
+          page = await fetchPage(conn, pitId, batchSize, cursorTs, cursorId, range, tsField);
         } else {
           throw e;
         }
