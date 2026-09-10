@@ -107,6 +107,21 @@ async function getRangeStats(cluster, database, table, whereClause = '', tsCol =
 // visible warning (this is exactly what happened with the Fortigate table).
 async function getExistingEventIds(cluster, database, table, eventIds) {
   if (!eventIds || eventIds.length === 0) return [];
+
+  // Split into sub-batches of 1000 to keep IN-list HTTP body under ClickHouse's
+  // max_query_size limit. A 10,000-ID IN-list routinely triggers Code 1000
+  // (Poco::Exception / HTML error page) when the serialized query exceeds ~1 MB.
+  const CHUNK = 1000;
+  if (eventIds.length > CHUNK) {
+    const results = [];
+    for (let i = 0; i < eventIds.length; i += CHUNK) {
+      const slice = eventIds.slice(i, i + CHUNK);
+      const partial = await getExistingEventIds(cluster, database, table, slice);
+      results.push(...partial);
+    }
+    return results;
+  }
+
   // Escape single-quotes to prevent injection from event_id values
   const inList = eventIds.map(id => `'${String(id).replace(/'/g, "''")}'`).join(',');
   const sql = `SELECT event_id FROM \`${database}\`.\`${table}\` WHERE event_id IN (${inList})`;
