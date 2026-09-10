@@ -435,10 +435,12 @@ async function runPipelineOnce(conn, cluster, pipeline, opts = {}) {
           if (e.dedupUnsupported && !dedupWarned) {
             dedupWarned = true;
             pipelineLog(pipeline.id, 'warn', e.message);
+          } else if (e.dedupFallback) {
+            pipelineLog(pipeline.id, 'warn', e.message);
           } else if (!e.dedupUnsupported) {
             throw e;
           }
-          // dedup unsupported → fall through and insert without a dedup check
+          // dedup unsupported / fallback → fall through and insert without a dedup check
         }
       }
 
@@ -739,10 +741,13 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
         if (e.dedupUnsupported && !dedupWarned) {
           dedupWarned = true;
           pipelineLog(pipeline.id, 'warn', e.message);
+        } else if (e.dedupFallback) {
+          // Transient ClickHouse error after retries — log once per chunk, insert without dedup.
+          pipelineLog(pipeline.id, 'warn', e.message);
         } else if (!e.dedupUnsupported) {
           throw e;
         }
-        // dedup unsupported → insert without a dedup check
+        // dedup unsupported / fallback → insert without a dedup check
       }
     }
     if (!insertRows.length) return;

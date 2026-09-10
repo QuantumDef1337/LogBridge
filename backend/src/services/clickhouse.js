@@ -109,17 +109,30 @@ async function getExistingEventIds(cluster, database, table, eventIds) {
   if (!eventIds || eventIds.length === 0) return [];
   // Escape single-quotes to prevent injection from event_id values
   const inList = eventIds.map(id => `'${String(id).replace(/'/g, "''")}'`).join(',');
-  try {
-    const res = await query(cluster, `SELECT event_id FROM \`${database}\`.\`${table}\` WHERE event_id IN (${inList})`);
-    return (res.data || []).map(r => r.event_id);
-  } catch (e) {
-    if (/UNKNOWN_IDENTIFIER|Code:\s*47\b/.test(e.message) && /event_id/.test(e.message)) {
-      const err = new Error(`Target table \`${database}\`.\`${table}\` has no 'event_id' column — deduplication is DISABLED for this pipeline. Duplicate rows will accumulate on every overlapping run.`);
-      err.dedupUnsupported = true;
-      throw err;
+  const sql = `SELECT event_id FROM \`${database}\`.\`${table}\` WHERE event_id IN (${inList})`;
+  // Retry up to 3 times on transient errors (429, timeout, network blip) before
+  // falling back to "insert anyway". Without retries a 429 storm silently disables
+  // dedup for the entire batch, letting duplicate rows accumulate.
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await query(cluster, sql);
+      return (res.data || []).map(r => r.event_id);
+    } catch (e) {
+      if (/UNKNOWN_IDENTIFIER|Code:\s*47\b/.test(e.message) && /event_id/.test(e.message)) {
+        const err = new Error(`Target table \`${database}\`.\`${table}\` has no 'event_id' column — deduplication is DISABLED for this pipeline. Duplicate rows will accumulate on every overlapping run.`);
+        err.dedupUnsupported = true;
+        throw err;
+      }
+      lastErr = e;
+      if (attempt < 2) await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
     }
-    return []; // other/transient error — skip this dedup check, insert anyway
   }
+  // All retries exhausted — log and fall through (insert without dedup check) so
+  // ingestion is not blocked, but the caller will see this in the warn log.
+  const fallbackErr = new Error(`dedup check failed after 3 attempts (${lastErr?.message?.slice(0, 80)}) — inserting without dedup`);
+  fallbackErr.dedupFallback = true;
+  throw fallbackErr;
 }
 
 module.exports = { testConnection, listDatabases, listTables, listColumns, insertRows, query, exec, countRows, getRangeStats, getExistingEventIds };
