@@ -6,6 +6,80 @@ Built with Node.js 24, React 18, and SQLite — zero external dependencies for m
 
 ---
 
+## Branches
+
+| Branch | Description |
+|---|---|
+| `main` | **V1** — Single-threaded async pipeline. Stable, production-proven. |
+| `logbridge-v2` | **V2** — Multi-threaded pipeline using Node.js Worker Threads. Use this when running 5+ pipelines simultaneously. |
+
+---
+
+## V2 — Multi-Threaded Pipeline
+
+> **Branch:** `logbridge-v2`
+
+V2 replaces V1's single async event loop with true OS-level parallelism via **Node.js Worker Threads**. Each worker runs in its own thread on its own CPU core — JSON parsing, OpenSearch scrolling, ClickHouse inserts, and dedup checks all happen in parallel with zero contention.
+
+### What changed in V2
+
+| Component | V1 | V2 |
+|---|---|---|
+| Worker model | Async coroutines on 1 thread | True OS threads (Worker Threads) |
+| Parallelism | Cooperative (event loop) | Preemptive (OS scheduler) |
+| Cross-thread stop | `stopRequested()` flag | `SharedArrayBuffer` + `Atomics` |
+| PIT rate-limiting | None | Atomic semaphore (`maxConcurrentPits=2`) |
+| Cursor on redistribution | Lost (bug) | Sent back via `postMessage` |
+| Dedup query | Single large IN-list (500 errors) | Chunked into 1000-ID sub-queries |
+| Sidebar label | LogBridge | LogBridge · V2 · Multi-Thread |
+
+### New files in V2
+
+| File | Purpose |
+|---|---|
+| `backend/src/workerThread.js` | Worker Thread entry point — runs OpenSearch scroll + ClickHouse insert in its own OS thread |
+| `backend/src/workerPool.js` | Thread pool — spawns N threads, routes chunks, manages SharedArrayBuffer semaphores |
+
+### Why use V2 over V1?
+
+V1 with 8 async workers is already network I/O-bound — adding more workers or vCPUs won't make a single pipeline faster. V2's advantage is **multi-pipeline load**:
+
+- **V1:** 5 pipelines × 8 workers = 40 coroutines sharing 1 event loop. CPU-side work (JSON parsing, transform, dedup) competes on one core. One slow callback delays all others.
+- **V2:** 5 pipelines × 8 workers = 40 true OS threads. Each thread runs independently on its own core. Pipelines don't interfere with each other.
+
+**Use V2 when you need to run 3+ pipelines simultaneously at full throughput.**
+
+### V2 PIT semaphore
+
+Each Worker Thread opens its own OpenSearch PIT context. Without rate-limiting, 8 threads × 157 daily indices = hundreds of concurrent scroll contexts, hitting OpenSearch's `max_open_scroll_context` limit (default: 500) with HTTP 429 errors.
+
+V2 solves this with a cross-thread atomic semaphore:
+
+```
+maxConcurrentPits = 2   (configurable via pipeline opts)
+157 indices × 2 concurrent PITs = ~314 scroll contexts — safely under 500
+```
+
+The semaphore uses `SharedArrayBuffer` + `Atomics.compareExchange` — a lock-free spin loop that works across OS thread boundaries without serialization overhead.
+
+### V2 hardware sizing
+
+| Resource | Recommendation |
+|---|---|
+| vCPU | 4 vCPU supports 6–8 workers (workers are I/O-bound, not CPU-bound) |
+| RAM | 8 workers × ~150 MB/worker = ~1.2 GB — safe on any 4 GB+ VM |
+| Network | The real bottleneck — faster OpenSearch/ClickHouse network = faster ingestion |
+
+### V2 validated results (local test)
+
+- 0 duplicate rows after full pipeline run
+- No `429 rejected_execution_exception` errors
+- All workers staying `PROCESSING` throughout
+- Dedup actively skipping already-inserted rows per batch
+- Compression ratio: ~29×
+
+---
+
 ## Table of Contents
 
 - [How It Works — Feature Guide](#how-it-works--feature-guide)
@@ -418,39 +492,81 @@ Use this to verify your field mappings are correct and your ClickHouse schema ma
 
 ## Architecture
 
+### V1 (main)
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        LogBridge                            │
+│                        LogBridge V1                         │
 │                                                             │
 │  React 18 UI (Vite)          Node.js 24 Backend (Express)  │
 │  ┌──────────────────┐        ┌──────────────────────────┐  │
 │  │ Dashboard        │◄──────►│ REST API (:4000)         │  │
 │  │ Pipelines        │  JWT   │ Scheduler (per-pipeline) │  │
-│  │ Connections      │        │ Runner (PIT + batching)  │  │
+│  │ Connections      │        │ Runner — async workers   │  │
 │  │ Clusters         │        │ SQLite (WAL mode)        │  │
 │  │ Jobs / Live Feed │        └──────────────────────────┘  │
 │  └──────────────────┘                  │                    │
 └─────────────────────────────────────────│───────────────────┘
                                           │
               ┌───────────────────────────┼──────────────────┐
-              │                           │                   │
-              ▼                           ▼                   │
-   OpenSearch / Wazuh Indexer       ClickHouse               │
-   (source — PIT + search_after)    (destination — HTTP)      │
+              ▼                           ▼
+   OpenSearch / Wazuh Indexer       ClickHouse
+   (source — PIT + search_after)    (destination — HTTP)
 ```
 
-### Data flow per batch
+### V2 (logbridge-v2)
 
 ```
-1. Open a PIT snapshot on the source index pattern
-2. Fetch pages of up to 10,000 docs each (search_after pagination)
-3. Accumulate pages until batch_size is reached
-4. Transform docs using field mappings defined in the pipeline
-5. Dedup-check event IDs against ClickHouse (optional)
-6. Single bulk insert into ClickHouse via INSERT ... FORMAT JSONEachRow
-7. Commit checkpoint to SQLite ONLY after ClickHouse ACK
-8. Close the PIT snapshot
-9. Wait poll_interval_secs, then repeat
+┌──────────────────────────────────────────────────────────────────────┐
+│                         LogBridge V2                                 │
+│                                                                      │
+│  React 18 UI            Node.js 24 Main Thread (Express + SQLite)   │
+│  ┌─────────────┐        ┌────────────────────────────────────────┐  │
+│  │ Dashboard   │◄──────►│ REST API (:4000)  Scheduler            │  │
+│  │ Pipelines   │  JWT   │ Runner.js         WorkerPool           │  │
+│  │ Jobs (feed) │        │ SQLite WAL        SharedArrayBuffer     │  │
+│  └─────────────┘        └──────────────┬───────────────────────┘  │
+└────────────────────────────────────────│──────────────────────────┘
+                                         │ postMessage (chunks)
+              ┌──────────────────────────┼──────────────────────────┐
+              │          Worker Threads (one per worker slot)        │
+              │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ...     │
+              │  │ Thread 0 │  │ Thread 1 │  │ Thread 2 │          │
+              │  │ OS core  │  │ OS core  │  │ OS core  │          │
+              │  └────┬─────┘  └────┬─────┘  └────┬─────┘          │
+              └───────│─────────────│──────────────│────────────────┘
+                      │             │              │
+              ┌───────▼─────────────▼──────────────▼───────┐
+              │   OpenSearch / Wazuh Indexer (PIT scroll)   │
+              └─────────────────────────────────────────────┘
+                      │             │              │
+              ┌───────▼─────────────▼──────────────▼───────┐
+              │   ClickHouse (bulk INSERT JSONEachRow)       │
+              └─────────────────────────────────────────────┘
+```
+
+### Data flow per batch (V2)
+
+```
+Main thread:
+1. Split window into N time chunks
+2. Submit chunks to WorkerPool queue
+
+Each Worker Thread (in parallel):
+3. Acquire PIT semaphore slot (SharedArrayBuffer Atomics)
+4. Open PIT snapshot on routed indices only
+5. Release semaphore slot
+6. Fetch pages via search_after pagination
+7. After each page: send CURSOR_UPDATE to main thread (safe redistribution)
+8. Transform docs using pipeline field mappings
+9. Dedup-check event IDs against ClickHouse (chunked 1000-ID queries)
+10. Bulk INSERT into ClickHouse via INSERT ... FORMAT JSONEachRow
+11. Send CHUNK_COMPLETE to main thread with inserted count
+12. Close PIT snapshot
+
+Main thread (finalization):
+13. All chunks COMPLETE → advance cursor checkpoint in SQLite
+14. Any chunk FAILED → leave cursor unchanged → next trigger re-covers window
 ```
 
 ---
@@ -667,18 +783,33 @@ A full schema reference is in [`sql/wazuh_alerts_raw.sql`](sql/wazuh_alerts_raw.
 
 | Metric | Value |
 |---|---|
-| Batch size | 20,000 rows (2 × 10K OS pages, configurable) |
-| Sustained throughput | ~600–1,200 rows/sec (depends on OS index density) |
-| ClickHouse compression | ~43× (ZSTD — 24 GB uncompressed → 551 MB on-disk) |
+| Batch size | 10,000 rows per worker per batch (configurable) |
+| Sustained throughput | ~500–7,000 rows/sec per worker (depends on index density and network) |
+| ClickHouse compression | ~29–43× (ZSTD — varies by log type) |
 | ClickHouse insert timeout | 120 seconds |
 | Poll interval | 30 seconds (configurable per pipeline) |
+| Max concurrent PITs (V2) | 2 (configurable via `maxConcurrentPits`) |
 
-**OpenSearch heap:** Each PIT scan loads shard data into OS JVM heap. For patterns spanning many daily indices (e.g. `wazuh-archives-*` across 30 days), the OS node needs at least **4 GB heap** (`-Xms4g -Xmx4g` in `jvm.options`). Lower heap causes `circuit_breaking_exception` which LogBridge detects and handles without a retry storm.
+**V2 recommended worker count by VM size:**
+
+| VM vCPU | Recommended workers | Notes |
+|---|---|---|
+| 2 vCPU | 4 workers | Main thread shares one core |
+| 4 vCPU | 6–8 workers | Workers are I/O-bound; over-provisioning is safe |
+| 8 vCPU | 10–12 workers | Increase `maxConcurrentPits` to 4 if >500 indices |
+
+**OpenSearch heap:** Each PIT scan loads shard data into OS JVM heap. For patterns spanning many daily indices (e.g. `wazuh-archives-*` across 157 daily indices), the OS node needs at least **4 GB heap** (`-Xms4g -Xmx4g` in `jvm.options`). Lower heap causes `circuit_breaking_exception` which LogBridge detects and handles without a retry storm.
 
 **Batch size tuning:**
 - Larger batches = fewer ClickHouse inserts = better compression, but more OS heap used per batch
 - If you see `circuit_breaking_exception`, reduce batch size (try 5,000) before increasing heap
-- Default of 20,000 works well for most Wazuh deployments with ≥4 GB OS heap
+- Default of 10,000 works well for most Wazuh deployments with ≥4 GB OS heap
+
+**PIT semaphore tuning (V2):**
+- Default `maxConcurrentPits=2` is safe for any OpenSearch cluster with default settings (500 context limit)
+- Formula: `maxConcurrentPits × number_of_indices < max_open_scroll_context`
+- Example: 4 PITs × 157 indices = 628 contexts → exceeds default 500 → keep at 2
+- Raise the limit instead: `PUT /_cluster/settings {"persistent":{"search.max_open_scroll_context":5000}}`
 
 ---
 
@@ -701,31 +832,33 @@ pm2 monit                           # live CPU/memory dashboard
 LogBridge/
 ├── backend/
 │   ├── src/
-│   │   ├── index.js          # Express server + graceful shutdown
-│   │   ├── db.js             # SQLite schema + WAL mode + migrations
-│   │   ├── scheduler.js      # Per-pipeline execution loop
-│   │   ├── runner.js         # PIT fetch + transform + CH insert
-│   │   ├── retry.js          # Exponential backoff + error classification
-│   │   ├── auth.js           # JWT sign/verify + requireAuth middleware
-│   │   ├── crypto.js         # AES-256-GCM credential encryption
-│   │   ├── audit.js          # Pipeline audit log helpers
+│   │   ├── index.js           # Express server + graceful shutdown
+│   │   ├── db.js              # SQLite schema + WAL mode + migrations
+│   │   ├── scheduler.js       # Per-pipeline execution loop
+│   │   ├── runner.js          # Chunk splitter + WorkerPool orchestration (V2)
+│   │   ├── workerPool.js      # [V2] Thread pool — spawns/reuses Worker Threads
+│   │   ├── workerThread.js    # [V2] Worker Thread — OpenSearch scroll + CH insert
+│   │   ├── retry.js           # Exponential backoff + error classification
+│   │   ├── auth.js            # JWT sign/verify + requireAuth middleware
+│   │   ├── crypto.js          # AES-256-GCM credential encryption
+│   │   ├── audit.js           # Pipeline audit log helpers
 │   │   ├── routes/
-│   │   │   ├── auth.js       # POST /api/auth/login, change-password
-│   │   │   ├── pipelines.js  # Pipeline CRUD + run/pause/reconcile/DLQ
+│   │   │   ├── auth.js        # POST /api/auth/login, change-password
+│   │   │   ├── pipelines.js   # Pipeline CRUD + run/pause/reconcile/DLQ
 │   │   │   ├── connections.js
 │   │   │   ├── clusters.js
-│   │   │   ├── jobs.js       # Pipeline logs + status
-│   │   │   └── health.js     # GET /api/health, /api/metrics
+│   │   │   ├── jobs.js        # Pipeline logs + status
+│   │   │   └── health.js      # GET /api/health, /api/metrics
 │   │   └── services/
-│   │       ├── opensearch.js # PIT open/fetch/close, search_after pagination
-│   │       ├── clickhouse.js # INSERT, query, dedup check, row count
-│   │       └── metrics.js    # 60s sliding window EPS/MB tracker
+│   │       ├── opensearch.js  # PIT open/fetch/close, search_after pagination
+│   │       ├── clickhouse.js  # INSERT, query, dedup check (1000-ID chunked), row count
+│   │       └── metrics.js     # 60s sliding window EPS/MB tracker
 │   ├── tests/
 │   └── package.json
 ├── frontend/
 │   ├── src/
-│   │   ├── App.jsx           # Routes + PrivateRoute guard
-│   │   ├── api.js            # Fetch wrapper + JWT headers + 401 redirect
+│   │   ├── App.jsx            # Routes + PrivateRoute guard
+│   │   ├── api.js             # Fetch wrapper + JWT headers + 401 redirect
 │   │   ├── pages/
 │   │   │   ├── Login.jsx
 │   │   │   ├── Dashboard.jsx
@@ -733,14 +866,14 @@ LogBridge/
 │   │   │   ├── PipelineEditor.jsx
 │   │   │   ├── Connections.jsx
 │   │   │   ├── Clusters.jsx
-│   │   │   └── Jobs.jsx      # Live Audit Feed + Copy All + Reset
+│   │   │   └── Jobs.jsx       # Live Audit Feed + Copy All + Reset
 │   │   └── components/
-│   │       └── Shell.jsx     # App shell + nav + logout
+│   │       └── Shell.jsx      # App shell + nav + logout + V2 version label
 │   └── package.json
 ├── sql/
-│   └── wazuh_alerts_raw.sql  # ClickHouse table DDL
-├── ecosystem.config.js       # PM2 config
-├── backend/.env.example      # Environment variable template
+│   └── wazuh_alerts_raw.sql   # ClickHouse table DDL
+├── ecosystem.config.js        # PM2 config
+├── backend/.env.example       # Environment variable template
 └── README.md
 ```
 
