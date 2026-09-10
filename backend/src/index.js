@@ -69,3 +69,10 @@ async function gracefulExit(signal) {
 
 process.on('SIGTERM', () => gracefulExit('SIGTERM'));
 process.on('SIGINT',  () => gracefulExit('SIGINT'));
+
+// Log unhandled rejections instead of crashing (Node 15+ crashes by default).
+// A crashed process under PM2 causes restart loops; this keeps the process alive
+// and surfaces the error in logs so it can be diagnosed and fixed properly.
+process.on('unhandledRejection', (reason) => {
+  console.error('[logbridge] unhandledRejection — process kept alive:', reason);
+});
