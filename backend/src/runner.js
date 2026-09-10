@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const os = require('./services/opensearch');
 const ch = require('./services/clickhouse');
 const { getDb } = require('./db');
-const { withRetry } = require('./retry');
+const { withRetry, sleep } = require('./retry');
 const metrics = require('./services/metrics');
 
 // Save the active PIT id so it survives across pages within one run.
@@ -561,23 +561,48 @@ async function runIndexPartition(conn, cluster, pipeline, indexName, opts = {}) 
  *
  * Returns { fetched, inserted, skipped, dlq, from, to }.
  */
+// Symbol thrown to unwind a worker immediately when the run is cancelled (pause).
+const RUN_CANCELLED = Symbol('run-cancelled');
+
+/**
+ * Run a time window with a shared work-queue of small chunks consumed by a pool of
+ * worker coroutines (single-process, so "claim" is a synchronous queue.shift() — no
+ * locks needed). Fast workers keep pulling more chunks, so a dense region can't leave
+ * others idle. A chunk that fails is retried in place, then requeued for another
+ * worker; only if it exhausts its redistribution budget is it marked FAILED.
+ *
+ * Cursor rule (all-or-nothing, per the "one trigger owns one window" requirement):
+ * the cursor advances to `to` ONLY when EVERY chunk is COMPLETE. Any permanent failure
+ * (or a pause) leaves the cursor untouched so the next trigger re-covers the window.
+ * Fetch uses PIT + search_after (one search context per active worker), which avoids
+ * the per-shard scroll-context ceiling that scroll-based fetching hit on wide patterns.
+ *
+ * Returns { fetched, inserted, skipped, dlq, from, to, chunks, complete, failed,
+ * cancelled? }. Throws when the window is left incomplete by failures (not by pause),
+ * so the scheduler marks the run errored and retries.
+ */
 async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
   const db = getDb();
   let dedupWarned = false; // shared across all workers — log the "dedup disabled" warning once per run
-  const sliceMax = Math.max(1, Math.min(pipeline.parallel_slices || 1, 10));
+  const workerCount = Math.max(1, Math.min(pipeline.parallel_slices || 1, 10));
   const tsField = pipeline.timestamp_field || '@timestamp';
   const batchSize = Math.min(pipeline.batch_size || 2000, 10000);
-  const retryOpts = {
+  const inPlaceRetries = Math.max(0, pipeline.retry_count ?? 5); // retries by the SAME worker before redistributing
+  const MAX_REDISTRIBUTIONS = 2;   // hand a failing chunk to at most this many OTHER workers before giving up
+  const OVERSPLIT = 5;             // chunks per worker — enough for fast workers to pick up slack
+  const MIN_CHUNK_MS = 60_000;     // don't split finer than 1 minute
+  const insertRetryOpts = {
     maxAttempts: (pipeline.retry_count || 5) + 1,
     initialDelayMs: 1000,
     maxDelayMs: 30000,
   };
+  const cancelToken = opts.cancelToken || null; // scheduler passes this for pause support
 
   // ── Compute time window ──────────────────────────────────────────────────────
   const to = opts.to || new Date();
   let from;
   if (opts.forceFrom) {
-    // Manual override (e.g. run-now with an explicit window)
+    // Manual override (e.g. run-now / date_range with an explicit window)
     from = opts.forceFrom instanceof Date ? opts.forceFrom : new Date(opts.forceFrom);
   } else {
     // Use the end of the last successful run as "from" so there are no gaps between runs.
@@ -589,132 +614,261 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
       : new Date(to.getTime() - lookbackMs);
   }
 
-  // ── Build time sub-windows for parallel workers ─────────────────────────────
-  // Time-window partitioning works regardless of shard count, unlike OpenSearch
-  // slice queries which only help when the index has multiple shards. Each worker
-  // scrolls its own non-overlapping time range concurrently.
-  const windowMs = to.getTime() - from.getTime();
-  const subMs = Math.max(1, Math.floor(windowMs / sliceMax));
-
-  const timeWindows = Array.from({ length: sliceMax }, (_, i) => {
-    const wFrom = new Date(from.getTime() + i * subMs);
-    if (i === sliceMax - 1) {
-      // Last window: inclusive upper bound covering any rounding remainder
-      return { gte: wFrom.toISOString(), lte: to.toISOString() };
-    }
-    // Intermediate windows: exclusive upper bound (lt) avoids boundary duplicates
-    return { gte: wFrom.toISOString(), lt: new Date(from.getTime() + (i + 1) * subMs).toISOString() };
-  });
-
-  pipelineLog(pipeline.id, 'info',
-    `Scheduled pull: ${from.toISOString()} → ${to.toISOString()} · ${sliceMax} time-window worker(s) · batch=${batchSize}`
-  );
-
-  const cancelToken = opts.cancelToken || null; // scheduler passes this for pause support
-
-  // ── Per-worker: scrolls its own time sub-window ──────────────────────────────
-  async function runWorker(workerId, range) {
-    let workerFetched = 0, workerInserted = 0, workerSkipped = 0, workerDlq = 0;
-    let batchRows = [];
-    // Timing for per-batch throughput. lastFlushAt marks the end of the previous batch
-    // cycle so we can measure the full fetch→transform→insert interval for this one.
-    let lastFlushAt = Date.now();
-
-    async function flushBatch() {
-      if (!batchRows.length) return;
-      const eventIds = batchRows.map(r => r.event_id).filter(Boolean);
-      let insertRows = batchRows;
-      if (eventIds.length > 0) {
-        try {
-          const existing = await ch.getExistingEventIds(
-            cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, eventIds
-          );
-          if (existing.length > 0) {
-            const existingSet = new Set(existing);
-            insertRows = batchRows.filter(r => !r.event_id || !existingSet.has(r.event_id));
-            workerSkipped += batchRows.length - insertRows.length;
-          }
-        } catch (e) {
-          if (e.dedupUnsupported && !dedupWarned) {
-            dedupWarned = true;
-            pipelineLog(pipeline.id, 'warn', e.message);
-          } else if (!e.dedupUnsupported) {
-            throw e;
-          }
-          // dedup unsupported → fall through and insert without a dedup check
-        }
-      }
-      if (insertRows.length) {
-        const ndjson = insertRows.map(r => JSON.stringify(r)).join('\n');
-        const insertStart = Date.now();
-        await withRetry(
-          () => ch.insertRows(cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, ndjson),
-          retryOpts
-        );
-        const now = Date.now();
-        workerInserted += insertRows.length;
-        metrics.recordIngestion(insertRows.length, Buffer.byteLength(ndjson, 'utf8'));
-
-        // Two rates: cycle = end-to-end throughput (fetch+transform+insert since the last
-        // batch); insert = pure ClickHouse write speed for this batch.
-        const cycleMs = Math.max(1, now - lastFlushAt);
-        const insertMs = Math.max(1, now - insertStart);
-        const cycleRate = Math.round(insertRows.length / (cycleMs / 1000));
-        const insertRate = Math.round(insertRows.length / (insertMs / 1000));
-        lastFlushAt = now;
-
-        pipelineLog(pipeline.id, 'info',
-          `[worker-${workerId}] Batch inserted: ${insertRows.length} rows in ${(cycleMs / 1000).toFixed(1)}s ` +
-          `(${cycleRate.toLocaleString()} rows/sec · insert ${insertRate.toLocaleString()}/s) ` +
-          `(skipped ${workerSkipped} dedup)`
-        );
-      }
-      batchRows = [];
-    }
-
-    // sliceId=0, sliceMax=1 → no shard slice block; full index scanned within the time range.
-    // Throw a sentinel inside onPage when cancelled so the scroll is abandoned immediately
-    // rather than waiting for the full sub-window to complete.
-    const CANCELLED = Symbol('cancelled');
-    try {
-      await os.fetchSlicedWindow(conn, pipeline.index_pattern, 0, 1, batchSize, range, tsField, async (docs) => {
-        if (cancelToken?.cancelled) throw CANCELLED;
-        workerFetched += docs.length;
-        for (const d of docs) {
-          try {
-            batchRows.push(transformDoc(d, pipeline));
-          } catch (e) {
-            toDlq(pipeline.id, [d], { message: e.message, category: 'transform' });
-            workerDlq++;
-          }
-          if (batchRows.length >= batchSize) await flushBatch();
-        }
-      });
-    } catch (e) {
-      if (e !== CANCELLED) throw e; // only swallow the cancellation sentinel
-    }
-
-    await flushBatch();
-    return { fetched: workerFetched, inserted: workerInserted, skipped: workerSkipped, dlq: workerDlq };
+  // ── Index-aware routing: learn each physical index's actual time span ────────
+  // A PIT/scroll opens one search context PER SHARD, so opening it on the full pattern
+  // (hundreds of daily indices) blows past the 500-context limit. Instead, route each
+  // chunk to only the indices whose data time-span overlaps it. Bounds come from the
+  // DATA (min/max @timestamp per _index), so this is layout-agnostic: daily-rotated,
+  // non-daily, single, or multi-index all work without parsing index names.
+  // Falls back to the full pattern if discovery fails (correctness over efficiency).
+  let indexBounds = null;
+  try {
+    indexBounds = await os.getPerIndexTimeBounds(conn, pipeline.index_pattern, tsField);
+    if (!indexBounds.length) indexBounds = null; // nothing discovered → fall back
+  } catch (e) {
+    pipelineLog(pipeline.id, 'warn',
+      `Index-aware routing unavailable (${String(e.message).slice(0, 120)}) — falling back to full pattern per chunk.`);
+    indexBounds = null;
   }
 
-  // ── Run all time-window workers in parallel ───────────────────────────────────
-  const results = await Promise.all(
-    timeWindows.map((range, i) => runWorker(i, range))
+  // Which physical indices can hold data for [startMs, endMs)? Overlap test on real
+  // data bounds. Returns null → caller uses the full pattern (fallback path).
+  function indicesForRange(startMs, endMs) {
+    if (!indexBounds) return null;
+    const hits = indexBounds.filter(b => b.min <= endMs && b.max >= startMs).map(b => b.index);
+    return hits; // may be [] → chunk provably has no data
+  }
+
+  // ── Build the chunk queue ────────────────────────────────────────────────────
+  // Split [from, to) into many small, non-overlapping time chunks (exclusive upper
+  // bound `lt`, except the last which is inclusive `lte`). More chunks than workers so
+  // fast workers can pick up extra — this is what gives dynamic load balancing.
+  const windowMs = Math.max(0, to.getTime() - from.getTime());
+  const desired = workerCount * OVERSPLIT;
+  const maxByMin = Math.max(1, Math.floor(windowMs / MIN_CHUNK_MS) || 1);
+  const chunkCount = Math.max(1, Math.min(desired, maxByMin));
+  const chunkMs = Math.max(1, Math.floor(windowMs / chunkCount));
+
+  const chunks = Array.from({ length: chunkCount }, (_, i) => {
+    const cFromMs = from.getTime() + i * chunkMs;
+    const isLast = i === chunkCount - 1;
+    const cEndMs = isLast ? to.getTime() : from.getTime() + (i + 1) * chunkMs;
+    return {
+      id: i,
+      gte: new Date(cFromMs).toISOString(),
+      lt:  isLast ? null : new Date(cEndMs).toISOString(),
+      lte: isLast ? to.toISOString() : null,
+      indices: indicesForRange(cFromMs, cEndMs), // null=full pattern, []=no data, [..]=routed
+      state: 'PENDING',            // PENDING → IN_PROGRESS → COMPLETE | FAILED
+      redistributions: 0,          // times handed to another worker after exhausting in-place retries
+      cursorTs: null, cursorId: null, // durable resume point within the chunk (last flushed row)
+      fetched: 0, inserted: 0, skipped: 0, dlq: 0,
+    };
+  });
+
+  // Diagnostic: max indices any single chunk routes to (proxy for shard fan-out per PIT).
+  const maxIdxPerChunk = indexBounds ? Math.max(0, ...chunks.map(c => (c.indices ? c.indices.length : 0))) : null;
+  pipelineLog(pipeline.id, 'info',
+    `Scheduled pull: ${from.toISOString()} → ${to.toISOString()} · ${workerCount} worker(s) · ${chunkCount} chunk(s) · batch=${batchSize} · PIT` +
+    (indexBounds ? ` · index-routed (${indexBounds.length} indices discovered, ≤${maxIdxPerChunk}/chunk)` : ` · full-pattern (routing unavailable)`)
   );
 
-  const totals = results.reduce(
-    (acc, r) => ({ fetched: acc.fetched + r.fetched, inserted: acc.inserted + r.inserted, skipped: acc.skipped + r.skipped, dlq: acc.dlq + r.dlq }),
+  // Shared queue of chunk ids. claim = shift (synchronous → exclusive, no locks).
+  const queue = chunks.map(c => c.id);
+  let inProgress = 0;
+
+  function claimNext() {
+    while (queue.length) {
+      const c = chunks[queue.shift()];
+      if (c.state === 'PENDING') { c.state = 'IN_PROGRESS'; inProgress++; return c; }
+    }
+    return null;
+  }
+
+  // Dedup + insert one batch of transformed rows; updates chunk stats and logs throughput.
+  async function flushChunkBatch(workerId, chunk, rows, cycleStart) {
+    if (!rows.length) return;
+    let insertRows = rows;
+    const eventIds = rows.map(r => r.event_id).filter(Boolean);
+    if (eventIds.length > 0) {
+      try {
+        const existing = await ch.getExistingEventIds(
+          cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, eventIds
+        );
+        if (existing.length > 0) {
+          const existingSet = new Set(existing);
+          insertRows = rows.filter(r => !r.event_id || !existingSet.has(r.event_id));
+          chunk.skipped += rows.length - insertRows.length;
+        }
+      } catch (e) {
+        if (e.dedupUnsupported && !dedupWarned) {
+          dedupWarned = true;
+          pipelineLog(pipeline.id, 'warn', e.message);
+        } else if (!e.dedupUnsupported) {
+          throw e;
+        }
+        // dedup unsupported → insert without a dedup check
+      }
+    }
+    if (!insertRows.length) return;
+    const ndjson = insertRows.map(r => JSON.stringify(r)).join('\n');
+    const insertStart = Date.now();
+    await withRetry(
+      () => ch.insertRows(cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, ndjson),
+      insertRetryOpts
+    );
+    const now = Date.now();
+    chunk.inserted += insertRows.length;
+    metrics.recordIngestion(insertRows.length, Buffer.byteLength(ndjson, 'utf8'));
+
+    const cycleMs = Math.max(1, now - cycleStart);
+    const insertMs = Math.max(1, now - insertStart);
+    const cycleRate = Math.round(insertRows.length / (cycleMs / 1000));
+    const insertRate = Math.round(insertRows.length / (insertMs / 1000));
+    pipelineLog(pipeline.id, 'info',
+      `[worker-${workerId}] chunk ${chunk.id}: inserted ${insertRows.length} rows in ${(cycleMs / 1000).toFixed(1)}s ` +
+      `(${cycleRate.toLocaleString()} rows/sec · insert ${insertRate.toLocaleString()}/s) (skipped ${chunk.skipped} dedup)`
+    );
+  }
+
+  // Ingest one chunk to completion via PIT + search_after, resuming from its durable
+  // cursor (so an in-place retry or a redistribution re-reads only what wasn't flushed).
+  async function ingestChunk(workerId, chunk) {
+    const range = { gte: chunk.gte };
+    if (chunk.lt) range.lt = chunk.lt; else range.lte = chunk.lte;
+
+    // Index-aware routing: [] means no index overlaps this chunk's window → provably no
+    // data, complete instantly without opening any context. null means routing was
+    // unavailable → fall back to the full pattern. Otherwise open the PIT on just the
+    // relevant indices, keeping shard/context fan-out tiny.
+    if (Array.isArray(chunk.indices) && chunk.indices.length === 0) return;
+    const target = Array.isArray(chunk.indices) && chunk.indices.length
+      ? chunk.indices.join(',')
+      : pipeline.index_pattern;
+
+    let pitId = (await os.openPit(conn, target)).pitId;
+    try {
+      while (true) {
+        if (cancelToken?.cancelled) throw RUN_CANCELLED;
+        const cycleStart = Date.now();
+        let page;
+        try {
+          page = await os.fetchPageWithPit(conn, pitId, batchSize, chunk.cursorTs, chunk.cursorId, range, tsField);
+        } catch (e) {
+          if (e.pitExpired) { // PIT aged out — recreate on the SAME routed target, resume from cursor
+            await os.closePit(conn, pitId).catch(() => {});
+            pitId = (await os.openPit(conn, target)).pitId;
+            continue;
+          }
+          throw e;
+        }
+        pitId = page.pitId;
+        if (!page.docs.length) break;
+
+        const rows = [];
+        for (const d of page.docs) {
+          try { rows.push(transformDoc(d, pipeline)); }
+          catch (e) { toDlq(pipeline.id, [d], { message: e.message, category: 'transform' }); chunk.dlq++; }
+        }
+        chunk.fetched += page.docs.length;
+        await flushChunkBatch(workerId, chunk, rows, cycleStart);
+        // Advance the durable cursor ONLY after the page's rows are safely inserted.
+        chunk.cursorTs = page.nextCursor.ts;
+        chunk.cursorId = page.nextCursor.id;
+      }
+    } finally {
+      await os.closePit(conn, pitId).catch(() => {});
+    }
+  }
+
+  // One chunk, with in-place retries. Returns true on COMPLETE, false on exhausted retries.
+  async function processChunk(workerId, chunk) {
+    for (let attempt = 0; attempt <= inPlaceRetries; attempt++) {
+      try {
+        await ingestChunk(workerId, chunk);
+        chunk.state = 'COMPLETE';
+        return true;
+      } catch (e) {
+        if (e === RUN_CANCELLED) throw e; // pause — unwind, don't retry
+        pipelineLog(pipeline.id, 'warn',
+          `[worker-${workerId}] chunk ${chunk.id} attempt ${attempt + 1}/${inPlaceRetries + 1} failed: ${String(e.message).slice(0, 160)}`
+        );
+        if (attempt < inPlaceRetries) await sleep(Math.min(30000, 1000 * 2 ** attempt));
+      }
+    }
+    return false;
+  }
+
+  // A worker coroutine: pull chunks until the queue is drained AND nothing is in flight.
+  async function worker(workerId) {
+    while (true) {
+      if (cancelToken?.cancelled) return;
+      const chunk = claimNext();
+      if (!chunk) {
+        if (inProgress === 0) return;      // queue empty and nobody can requeue → done
+        await sleep(200);                  // others still working (may requeue) → wait
+        continue;
+      }
+      try {
+        const ok = await processChunk(workerId, chunk);
+        if (!ok) {
+          if (chunk.redistributions < MAX_REDISTRIBUTIONS) {
+            chunk.redistributions++;
+            chunk.state = 'PENDING';       // hand back to the pool for another worker
+            queue.push(chunk.id);
+            pipelineLog(pipeline.id, 'warn',
+              `[worker-${workerId}] chunk ${chunk.id} requeued for redistribution (${chunk.redistributions}/${MAX_REDISTRIBUTIONS})`);
+          } else {
+            chunk.state = 'FAILED';
+            pipelineLog(pipeline.id, 'error',
+              `chunk ${chunk.id} [${chunk.gte} → ${chunk.lt || chunk.lte}] FAILED permanently after ${chunk.redistributions} redistribution(s)`);
+          }
+        }
+      } catch (e) {
+        if (e === RUN_CANCELLED) return;   // pause — stop claiming
+        // Unexpected error escaping processChunk — treat like an exhausted attempt.
+        if (chunk.redistributions < MAX_REDISTRIBUTIONS) {
+          chunk.redistributions++;
+          chunk.state = 'PENDING';
+          queue.push(chunk.id);
+        } else {
+          chunk.state = 'FAILED';
+          pipelineLog(pipeline.id, 'error', `chunk ${chunk.id} FAILED: ${String(e.message).slice(0, 160)}`);
+        }
+      } finally {
+        inProgress--;                      // no longer in flight (completed / requeued / failed)
+      }
+    }
+  }
+
+  // ── Run the worker pool ───────────────────────────────────────────────────────
+  await Promise.all(Array.from({ length: workerCount }, (_, i) => worker(i)));
+
+  // ── Centralized finalization: inspect EVERY chunk, then decide on the cursor ──
+  const totals = chunks.reduce(
+    (a, c) => ({ fetched: a.fetched + c.fetched, inserted: a.inserted + c.inserted, skipped: a.skipped + c.skipped, dlq: a.dlq + c.dlq }),
     { fetched: 0, inserted: 0, skipped: 0, dlq: 0 }
   );
+  const completeCount = chunks.filter(c => c.state === 'COMPLETE').length;
+  const failed = chunks.filter(c => c.state !== 'COMPLETE');
 
-  pipelineLog(pipeline.id, 'info',
-    `Scheduled run complete — fetched ${totals.fetched}, inserted ${totals.inserted}, skipped ${totals.skipped} (dedup), dlq ${totals.dlq} · ${sliceMax} worker(s)`
-  );
+  // Pause: never advance the cursor on a cancelled run — the window is not finished.
+  if (cancelToken?.cancelled) {
+    pipelineLog(pipeline.id, 'warn',
+      `Run paused — ${completeCount}/${chunks.length} chunk(s) complete. Cursor NOT advanced; next run re-covers [${from.toISOString()} → ${to.toISOString()}].`);
+    return { ...totals, from, to, chunks: chunks.length, complete: completeCount, failed: failed.length, cancelled: true };
+  }
 
-  // ── Persist checkpoint ONLY after all slices succeed ────────────────────────
-  // Writing cursor_timestamp = to means the next run will start from here — no gaps.
-  // A partial failure (exception above) skips this block, so next trigger re-covers the range.
+  // Incomplete: some chunk failed after all retries/redistributions. Do NOT advance the
+  // cursor. Throw so the scheduler marks the run errored and re-covers the window later.
+  if (failed.length > 0) {
+    pipelineLog(pipeline.id, 'error',
+      `Scheduled window INCOMPLETE — ${completeCount}/${chunks.length} chunk(s) complete, ${failed.length} failed. ` +
+      `Cursor NOT advanced; next trigger re-covers [${from.toISOString()} → ${to.toISOString()}].`);
+    throw new Error(`Scheduled window incomplete: ${failed.length}/${chunks.length} chunk(s) failed after retries`);
+  }
+
+  // ── All chunks COMPLETE → advance the cursor to `to` (all-or-nothing) ─────────
   db.prepare(`
     INSERT INTO pipeline_status
       (pipeline_id, cursor_timestamp, rows_inserted_total, rows_inserted_today, rows_skipped_dedup, rows_dlq, last_success_at, updated_at)
@@ -733,7 +887,13 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
     totals.inserted, totals.inserted, totals.skipped, totals.dlq
   );
 
-  return { ...totals, from, to };
+  pipelineLog(pipeline.id, 'info',
+    `Scheduled run complete — window fully ingested [${from.toISOString()} → ${to.toISOString()}] · ` +
+    `fetched ${totals.fetched}, inserted ${totals.inserted}, skipped ${totals.skipped} (dedup), dlq ${totals.dlq} · ` +
+    `${chunks.length} chunk(s) · ${workerCount} worker(s). Cursor advanced.`
+  );
+
+  return { ...totals, from, to, chunks: chunks.length, complete: completeCount, failed: 0 };
 }
 
 module.exports = { runPipelineOnce, runIndexPartition, runScheduledSlices, transformDoc, buildRange };

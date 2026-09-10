@@ -132,22 +132,38 @@ LogBridge supports four pull modes. Each defines the **time window** the pipelin
   run starts exactly where the last one ended — **no gaps even if the cron fires late**
 - The cursor is only advanced after a run completes successfully (see the data-safety note below)
 
-**Parallel Workers** (`parallel_slices`, all backfill modes): the configured time window is split
-into N equal sub-windows, each scrolled concurrently by its own worker. This works for any index
-regardless of shard count.
+**Parallel Workers** (`parallel_slices`, backfill/scheduled modes): the window is processed by a
+**shared work-queue of small chunks** consumed by a pool of N worker coroutines. This is what makes
+one trigger complete an entire window with dynamic load balancing:
 
-> ⚠️ **Scroll-context limit:** each worker opens one OpenSearch scroll context *per shard*. Index
-> patterns spanning many daily indices (hundreds of shards) can exceed the server's
-> `search.max_open_scroll_context` limit (default 500), especially with multiple workers. If you hit
-> `Trying to create too many scroll contexts`, reduce `parallel_slices`, narrow the index pattern, or
-> raise the server limit. A PIT-based backfill (one context per search instead of per shard) is the
-> planned fix.
+- The window is split into **many small time chunks** (≈ `parallel_slices × 5`, floored at 1-minute
+  chunks) — more chunks than workers, so fast workers keep pulling more while a dense region is still
+  draining. No worker permanently owns a slice; claiming a chunk is a synchronous queue operation
+  (single process, so no locks and no double-processing).
+- **Index-aware routing:** each chunk opens its PIT only on the physical indices whose *data* time
+  span overlaps that chunk (learned from a one-shot min/max-per-`_index` aggregation — no index-name
+  parsing, so it works for daily-rotated, non-daily, single, or multi-index layouts alike). On a
+  157-daily-index pattern this cuts the per-request fan-out from 157 indices to ≈7, keeping open
+  search contexts far below the server limit.
+- **Fetch is PIT + `search_after`** (not scroll), resuming each chunk from a durable per-chunk cursor.
+- **Retry & redistribution within the same trigger:** a failing chunk is retried in place up to
+  `retry_count` times by the same worker; if still failing it is requeued for another worker (up to a
+  bounded number of redistributions). A worker failing does **not** fail the work — the chunk does.
+- **Centralized finalization (all-or-nothing cursor):** after all workers drain the queue, a single
+  finalizer verifies **every** chunk is `COMPLETE`. Only then is the cursor advanced to the window
+  end. If any chunk is permanently `FAILED` (or the run was paused), the cursor is left unchanged and
+  the run reports `WINDOW INCOMPLETE`, so the next trigger re-covers the window.
 
-**Data-safety guarantee:** a scroll that returns a partial result (`timed_out`, shard failures, or
-fewer docs than OpenSearch reported) now **aborts loudly instead of being treated as "done."** The
-cursor is *not* advanced on a failed run, so a partial fetch can never be silently recorded as
-complete — the run re-pulls the missing window next time. Combined with `event_id` [deduplication](#7-deduplication--no-duplicate-rows-in-clickhouse),
-this gives no-gap **and** no-duplicate ingestion.
+> Each worker holds one PIT context per shard of its chunk's routed indices, so keep an eye on the
+> server's `search.max_open_pit_context` limit for very wide windows with many workers; index-aware
+> routing keeps this small in normal operation. PIT contexts are closed as each chunk finishes;
+> a hard process kill can leave contexts open until their 5-minute keep-alive expires.
+
+**Data-safety guarantee:** a partial fetch (`timed_out`, shard failures, or fewer docs than OpenSearch
+reported) **aborts loudly instead of being treated as "done,"** and the cursor is never advanced past
+an incomplete window. Combined with `event_id` [deduplication](#7-deduplication--no-duplicate-rows-in-clickhouse)
+and a `ReplacingMergeTree` target, this gives no-gap **and** no-duplicate ingestion even across
+retries and redistribution.
 
 You can switch modes at any time by editing the pipeline. The cursor is preserved unless you explicitly reset it.
 

@@ -102,6 +102,7 @@ async function fetchPage(conn, indexPattern, batchSize, cursorTs, cursorId, rang
   const tsRange = {};
   if (range.gte) tsRange.gte = range.gte;
   if (range.lte) tsRange.lte = range.lte;
+  if (range.lt)  tsRange.lt  = range.lt;   // exclusive upper bound for non-overlapping chunks
   if (cursorTs) tsRange.gt = cursorTs;
 
   const filters = [];
@@ -200,6 +201,7 @@ async function fetchPageWithPit(conn, pitId, batchSize, cursorTs, cursorId, rang
   const tsRange = {};
   if (range.gte) tsRange.gte = range.gte;
   if (range.lte) tsRange.lte = range.lte;
+  if (range.lt)  tsRange.lt  = range.lt;   // exclusive upper bound for non-overlapping chunks
   if (cursorTs) tsRange.gt = cursorTs;
 
   const filters = [];
@@ -332,6 +334,48 @@ async function getRangeStats(conn, indexPattern, range = {}, tsField = '@timesta
 }
 
 /**
+ * Per-physical-index time bounds for index-aware chunk routing.
+ * One aggregation search (size:0, terms on _index with min/max sub-aggs) returns the
+ * actual oldest/newest timestamp of every physical index matching the pattern — derived
+ * from the DATA, so it works for any layout (daily-rotated, non-daily, single, multi)
+ * without parsing index names. This is a transient search: it does NOT hold a scroll/PIT
+ * context, so it doesn't count against the open-context limit.
+ *
+ * Returns [{ index, min, max }] with min/max as epoch millis; indices with no timestamped
+ * docs are omitted.
+ */
+async function getPerIndexTimeBounds(conn, indexPattern, tsField = '@timestamp') {
+  const body = {
+    size: 0,
+    aggs: {
+      by_index: {
+        terms: { field: '_index', size: 10000 },
+        aggs: {
+          min_ts: { min: { field: tsField } },
+          max_ts: { max: { field: tsField } },
+        },
+      },
+    },
+  };
+  const res = await fetch(`${conn.url}/${indexPattern}/_search`, {
+    method: 'POST',
+    headers: { Authorization: authHeader(conn), 'Content-Type': 'application/json' },
+    agent: makeAgent(conn),
+    timeout: 30000,
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`per-index bounds _search HTTP ${res.status}: ${text}`);
+  }
+  const d = await res.json();
+  const buckets = d.aggregations?.by_index?.buckets || [];
+  return buckets
+    .map(b => ({ index: b.key, min: b.min_ts?.value ?? null, max: b.max_ts?.value ?? null }))
+    .filter(b => b.min != null && b.max != null);
+}
+
+/**
  * Resolve a wildcard index pattern to a list of matching physical index names.
  * Uses _cat/indices and filters client-side (avoids _resolve API compat issues).
  */
@@ -448,4 +492,4 @@ async function fetchSlicedWindow(conn, indexPattern, sliceId, sliceMax, batchSiz
   }
 }
 
-module.exports = { testConnection, listIndices, getIndexTimestamps, sampleDocs, fetchPage, openPit, closePit, fetchPageWithPit, getIndexCount, getRangeStats, discoverIndexes, fetchSlicedWindow };
+module.exports = { testConnection, listIndices, getIndexTimestamps, sampleDocs, fetchPage, openPit, closePit, fetchPageWithPit, getIndexCount, getRangeStats, getPerIndexTimeBounds, discoverIndexes, fetchSlicedWindow };
