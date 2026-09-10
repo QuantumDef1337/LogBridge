@@ -41,7 +41,10 @@ class WorkerPool {
     // Without this, all N threads open PITs simultaneously, hitting OpenSearch's
     // max_open_scroll_context limit (default 500) and getting 429 errors.
     // Each thread acquires one slot before openPit() and releases it after.
-    const maxConcurrentPits = sharedOpts.opts.maxConcurrentPits || Math.max(1, Math.floor(size / 2));
+    // Default to 2 — conservative enough for local/small OpenSearch (157 indices × 2 PITs
+    // = ~314 scroll contexts, well under the default max_open_scroll_context of 500).
+    // Raise via pipeline config maxConcurrentPits on large production clusters.
+    const maxConcurrentPits = sharedOpts.opts.maxConcurrentPits || 2;
     this._pitSemBuf  = new SharedArrayBuffer(4);
     this._pitSem     = new Int32Array(this._pitSemBuf);
     Atomics.store(this._pitSem, 0, maxConcurrentPits);
