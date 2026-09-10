@@ -177,6 +177,17 @@ async function chInsert(cluster, database, table, ndjson) {
 
 async function getExistingEventIds(cluster, database, table, eventIds) {
   if (!eventIds.length) return [];
+  // Chunk into 1000-ID batches — a full 10k-ID IN-list serializes to ~500 KB and
+  // triggers ClickHouse Poco::Exception Code 1000 (HTML error page instead of JSON).
+  const CHUNK = 1000;
+  if (eventIds.length > CHUNK) {
+    const results = [];
+    for (let i = 0; i < eventIds.length; i += CHUNK) {
+      const partial = await getExistingEventIds(cluster, database, table, eventIds.slice(i, i + CHUNK));
+      results.push(...partial);
+    }
+    return results;
+  }
   const inList = eventIds.map(id => `'${String(id).replace(/'/g, "''")}'`).join(',');
   const sql    = `SELECT event_id FROM \`${database}\`.\`${table}\` WHERE event_id IN (${inList})`;
   let lastErr;
