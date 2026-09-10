@@ -312,6 +312,7 @@ async function runPipelineOnce(conn, cluster, pipeline, opts = {}) {
   let skipped = 0;
   let dlq = 0;
   let sampleRows = [];
+  let dedupWarned = false; // log the "dedup disabled" warning once per run, not per batch
   let lastCursor = null;
   // Capture the oldest event timestamp once — from the first doc of the first page
   // when starting from scratch (no cursor). Used to populate oldest_source_ts.
@@ -420,13 +421,23 @@ async function runPipelineOnce(conn, cluster, pipeline, opts = {}) {
       let insertRows = accumRows;
       const batchEventIds = accumRows.map(r => r.event_id).filter(Boolean);
       if (batchEventIds.length > 0) {
-        const existing = await ch.getExistingEventIds(
-          cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, batchEventIds
-        );
-        if (existing.length > 0) {
-          const existingSet = new Set(existing);
-          insertRows = accumRows.filter(r => !r.event_id || !existingSet.has(r.event_id));
-          skipped += accumRows.length - insertRows.length;
+        try {
+          const existing = await ch.getExistingEventIds(
+            cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, batchEventIds
+          );
+          if (existing.length > 0) {
+            const existingSet = new Set(existing);
+            insertRows = accumRows.filter(r => !r.event_id || !existingSet.has(r.event_id));
+            skipped += accumRows.length - insertRows.length;
+          }
+        } catch (e) {
+          if (e.dedupUnsupported && !dedupWarned) {
+            dedupWarned = true;
+            pipelineLog(pipeline.id, 'warn', e.message);
+          } else if (!e.dedupUnsupported) {
+            throw e;
+          }
+          // dedup unsupported → fall through and insert without a dedup check
         }
       }
 
@@ -552,6 +563,7 @@ async function runIndexPartition(conn, cluster, pipeline, indexName, opts = {}) 
  */
 async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
   const db = getDb();
+  let dedupWarned = false; // shared across all workers — log the "dedup disabled" warning once per run
   const sliceMax = Math.max(1, Math.min(pipeline.parallel_slices || 1, 10));
   const tsField = pipeline.timestamp_field || '@timestamp';
   const batchSize = Math.min(pipeline.batch_size || 2000, 10000);
@@ -613,13 +625,23 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
       const eventIds = batchRows.map(r => r.event_id).filter(Boolean);
       let insertRows = batchRows;
       if (eventIds.length > 0) {
-        const existing = await ch.getExistingEventIds(
-          cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, eventIds
-        );
-        if (existing.length > 0) {
-          const existingSet = new Set(existing);
-          insertRows = batchRows.filter(r => !r.event_id || !existingSet.has(r.event_id));
-          workerSkipped += batchRows.length - insertRows.length;
+        try {
+          const existing = await ch.getExistingEventIds(
+            cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, eventIds
+          );
+          if (existing.length > 0) {
+            const existingSet = new Set(existing);
+            insertRows = batchRows.filter(r => !r.event_id || !existingSet.has(r.event_id));
+            workerSkipped += batchRows.length - insertRows.length;
+          }
+        } catch (e) {
+          if (e.dedupUnsupported && !dedupWarned) {
+            dedupWarned = true;
+            pipelineLog(pipeline.id, 'warn', e.message);
+          } else if (!e.dedupUnsupported) {
+            throw e;
+          }
+          // dedup unsupported → fall through and insert without a dedup check
         }
       }
       if (insertRows.length) {

@@ -97,7 +97,14 @@ async function getRangeStats(cluster, database, table, whereClause = '', tsCol =
 }
 
 // Check which event_ids from a batch already exist in ClickHouse (for dedup).
-// Returns [] if the column doesn't exist or the query fails — caller falls through.
+// Returns [] if the query fails for a transient reason (network blip, etc.) — caller
+// falls through and inserts anyway rather than blocking ingestion.
+//
+// If the target table has no `event_id` column, ClickHouse raises UNKNOWN_IDENTIFIER
+// (code 47) — that specific failure is NOT swallowed here. It is re-thrown as a tagged
+// error so the caller can log it loudly: silently returning [] in that case would look
+// identical to "no duplicates found" and let duplicate rows accumulate forever with no
+// visible warning (this is exactly what happened with the Fortigate table).
 async function getExistingEventIds(cluster, database, table, eventIds) {
   if (!eventIds || eventIds.length === 0) return [];
   // Escape single-quotes to prevent injection from event_id values
@@ -105,8 +112,13 @@ async function getExistingEventIds(cluster, database, table, eventIds) {
   try {
     const res = await query(cluster, `SELECT event_id FROM \`${database}\`.\`${table}\` WHERE event_id IN (${inList})`);
     return (res.data || []).map(r => r.event_id);
-  } catch {
-    return []; // column absent or table error — skip dedup silently
+  } catch (e) {
+    if (/UNKNOWN_IDENTIFIER|Code:\s*47\b/.test(e.message) && /event_id/.test(e.message)) {
+      const err = new Error(`Target table \`${database}\`.\`${table}\` has no 'event_id' column — deduplication is DISABLED for this pipeline. Duplicate rows will accumulate on every overlapping run.`);
+      err.dedupUnsupported = true;
+      throw err;
+    }
+    return []; // other/transient error — skip this dedup check, insert anyway
   }
 }
 
