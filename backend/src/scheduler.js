@@ -217,8 +217,11 @@ async function runLoop(pipelineId, token) {
         if (!token.cancelled && !shuttingDown) {
           db.prepare("UPDATE pipelines SET status='paused', updated_at=datetime('now') WHERE id=?").run(pipelineId);
           db.prepare("UPDATE pipeline_status SET status='idle', last_success_at=datetime('now'), last_error=NULL WHERE pipeline_id=?").run(pipelineId);
+          const speed = result.avgRowsPerSec != null
+            ? ` in ${result.durationSec}s at avg ${result.avgRowsPerSec.toLocaleString()} rows/sec (started ${result.startedAt}, ended ${result.endedAt})`
+            : '';
           db.prepare("INSERT INTO pipeline_logs (pipeline_id, level, message) VALUES (?, 'info', ?)")
-            .run(pipelineId, `Parallel backfill complete — fetched ${result.fetched}, inserted ${result.inserted}, skipped ${result.skipped} (dedup), dlq ${result.dlq}`);
+            .run(pipelineId, `Parallel backfill complete — fetched ${result.fetched}, inserted ${result.inserted}, skipped ${result.skipped} (dedup), dlq ${result.dlq}${speed}. Pipeline auto-paused.`);
         }
         break;
       }

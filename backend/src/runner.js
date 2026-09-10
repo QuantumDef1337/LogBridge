@@ -584,6 +584,7 @@ const RUN_CANCELLED = Symbol('run-cancelled');
  */
 async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
   const db = getDb();
+  const runStartMs = Date.now(); // wall-clock run start, for the completion summary
   let dedupWarned = false; // shared across all workers — log the "dedup disabled" warning once per run
   const workerCount = Math.max(1, Math.min(pipeline.parallel_slices || 1, 10));
   const tsField = pipeline.timestamp_field || '@timestamp';
@@ -952,13 +953,28 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
   );
 
   finalizeProgress('COMPLETE');
+
+  // ── Detailed completion summary: wall-clock start/end, duration, avg speed ────
+  const endMs = Date.now();
+  const durationSec = Math.max(0.001, (endMs - runStartMs) / 1000);
+  const fmtDur = (s) => s < 60 ? `${s.toFixed(1)}s`
+    : s < 3600 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`
+    : `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m`;
+  const avgRate = Math.round(totals.inserted / durationSec);
   pipelineLog(pipeline.id, 'info',
     `Scheduled run complete — window fully ingested [${from.toISOString()} → ${to.toISOString()}] · ` +
     `fetched ${totals.fetched}, inserted ${totals.inserted}, skipped ${totals.skipped} (dedup), dlq ${totals.dlq} · ` +
     `${chunks.length} chunk(s) · ${workerCount} worker(s). Cursor advanced.`
   );
+  pipelineLog(pipeline.id, 'info',
+    `Ingestion summary — started ${new Date(runStartMs).toISOString()}, ended ${new Date(endMs).toISOString()}, ` +
+    `duration ${fmtDur(durationSec)} · inserted ${totals.inserted.toLocaleString()} rows at avg ${avgRate.toLocaleString()} rows/sec ` +
+    `(${(totals.inserted / durationSec / 1000).toFixed(1)}k/s) across ${workerCount} worker(s), ${chunks.length} chunk(s).`
+  );
 
-  return { ...totals, from, to, chunks: chunks.length, complete: completeCount, failed: 0 };
+  return { ...totals, from, to, chunks: chunks.length, complete: completeCount, failed: 0,
+    startedAt: new Date(runStartMs).toISOString(), endedAt: new Date(endMs).toISOString(),
+    durationSec: Math.round(durationSec), avgRowsPerSec: avgRate };
 }
 
 module.exports = { runPipelineOnce, runIndexPartition, runScheduledSlices, transformDoc, buildRange };
