@@ -31,7 +31,12 @@ export default function Shell() {
         {/* Logo */}
         <div className="flex items-center gap-3 px-4 py-5 border-b border-slate-800">
           <img src="/logo.png" alt="LogBridge" className="w-7 h-7 rounded-md flex-shrink-0 object-contain" />
-          {open && <span className="font-bold text-white text-sm tracking-wide">LogBridge</span>}
+          {open && (
+            <div className="flex flex-col leading-tight">
+              <span className="font-bold text-white text-sm tracking-wide">LogBridge</span>
+              <span className="text-[10px] font-semibold tracking-widest text-brand-400 uppercase">V2 · Multi-Thread</span>
+            </div>
+          )}
         </div>
 
         {/* Nav */}
