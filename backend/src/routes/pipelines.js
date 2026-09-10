@@ -4,6 +4,7 @@ const { requireAuth } = require('../auth');
 const scheduler = require('../scheduler');
 const { decryptRow } = require('../crypto');
 const audit = require('../audit');
+const progress = require('../progress');
 
 router.use(requireAuth);
 
@@ -178,6 +179,11 @@ router.get('/:id/logs', (req, res) => {
     'SELECT id, level, message, created_at FROM pipeline_logs WHERE pipeline_id = ? ORDER BY created_at DESC LIMIT ?'
   ).all(req.params.id, limit);
   res.json(rows);
+});
+
+// Live chunk-queue progress for the parallel-run view (in-memory; null if no run yet).
+router.get('/:id/progress', (req, res) => {
+  res.json(progress.snapshot(req.params.id));
 });
 
 // Reset row counters for a pipeline (Today + Total + Week)

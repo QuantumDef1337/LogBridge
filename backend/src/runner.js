@@ -4,6 +4,7 @@ const ch = require('./services/clickhouse');
 const { getDb } = require('./db');
 const { withRetry, sleep } = require('./retry');
 const metrics = require('./services/metrics');
+const progress = require('./progress');
 
 // Save the active PIT id so it survives across pages within one run.
 function savePitId(pipelineId, pitId) {
@@ -686,6 +687,26 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
     (indexBounds ? ` · index-routed (${indexBounds.length} indices discovered, ≤${maxIdxPerChunk}/chunk)` : ` · full-pattern (routing unavailable)`)
   );
 
+  // ── Live progress (in-memory, for the UI progress view) ──────────────────────
+  const prog = {
+    pipelineId: pipeline.id,
+    running: true,
+    startedAt: new Date().toISOString(),
+    endedAt: null,
+    window: { from: from.toISOString(), to: to.toISOString() },
+    workerCount,
+    chunkCount: chunks.length,
+    indexRouted: !!indexBounds,
+    indicesDiscovered: indexBounds ? indexBounds.length : 0,
+    maxRunMinutes: maxRunMs ? Math.round(maxRunMs / 60000) : 0,
+    chunks, // live reference — snapshot() serializes state on demand
+    workers: Array.from({ length: workerCount }, (_, i) => ({
+      id: i, status: 'IDLE', current_chunk: null, current_range: null, completed: 0, retries: 0,
+    })),
+    finalStatus: null,
+  };
+  progress.start(pipeline.id, prog);
+
   // Shared queue of chunk ids. claim = shift (synchronous → exclusive, no locks).
   const queue = chunks.map(c => c.id);
   let inProgress = 0;
@@ -796,17 +817,20 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
 
   // One chunk, with in-place retries. Returns true on COMPLETE, false on exhausted retries.
   async function processChunk(workerId, chunk) {
+    const w = prog.workers[workerId];
     for (let attempt = 0; attempt <= inPlaceRetries; attempt++) {
       try {
+        w.status = attempt === 0 ? 'PROCESSING' : 'RETRYING';
         await ingestChunk(workerId, chunk);
         chunk.state = 'COMPLETE';
         return true;
       } catch (e) {
         if (e === RUN_CANCELLED) throw e; // pause — unwind, don't retry
+        w.retries++;
         pipelineLog(pipeline.id, 'warn',
           `[worker-${workerId}] chunk ${chunk.id} attempt ${attempt + 1}/${inPlaceRetries + 1} failed: ${String(e.message).slice(0, 160)}`
         );
-        if (attempt < inPlaceRetries) await sleep(Math.min(30000, 1000 * 2 ** attempt));
+        if (attempt < inPlaceRetries) { w.status = 'RETRYING'; await sleep(Math.min(30000, 1000 * 2 ** attempt)); }
       }
     }
     return false;
@@ -814,16 +838,22 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
 
   // A worker coroutine: pull chunks until the queue is drained AND nothing is in flight.
   async function worker(workerId) {
+    const w = prog.workers[workerId];
     while (true) {
-      if (stopRequested()) return; // stop claiming on pause/shutdown or deadline
+      if (stopRequested()) { w.status = 'IDLE'; w.current_chunk = null; w.current_range = null; return; }
       const chunk = claimNext();
       if (!chunk) {
+        w.status = 'IDLE'; w.current_chunk = null; w.current_range = null;
         if (inProgress === 0) return;      // queue empty and nobody can requeue → done
         await sleep(200);                  // others still working (may requeue) → wait
         continue;
       }
+      w.status = 'PROCESSING';
+      w.current_chunk = chunk.id;
+      w.current_range = { gte: chunk.gte, end: chunk.lt || chunk.lte };
       try {
         const ok = await processChunk(workerId, chunk);
+        if (ok) w.completed++;
         if (!ok) {
           if (chunk.redistributions < MAX_REDISTRIBUTIONS) {
             chunk.redistributions++;
@@ -865,8 +895,17 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
   const completeCount = chunks.filter(c => c.state === 'COMPLETE').length;
   const failed = chunks.filter(c => c.state !== 'COMPLETE');
 
+  // Mark the live progress terminal so the UI shows the final outcome.
+  const finalizeProgress = (status) => {
+    prog.running = false;
+    prog.endedAt = new Date().toISOString();
+    prog.finalStatus = status;
+    for (const w of prog.workers) { w.status = 'COMPLETED'; w.current_chunk = null; w.current_range = null; }
+  };
+
   // Pause: never advance the cursor on a cancelled run — the window is not finished.
   if (cancelToken?.cancelled) {
+    finalizeProgress('CANCELLED');
     pipelineLog(pipeline.id, 'warn',
       `Run paused — ${completeCount}/${chunks.length} chunk(s) complete. Cursor NOT advanced; next run re-covers [${from.toISOString()} → ${to.toISOString()}].`);
     return { ...totals, from, to, chunks: chunks.length, complete: completeCount, failed: failed.length, cancelled: true };
@@ -880,11 +919,13 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
   // below even when the deadline elapsed at the very end.
   if (failed.length > 0) {
     if (deadlineHit()) {
+      finalizeProgress('INCOMPLETE');
       pipelineLog(pipeline.id, 'warn',
         `Run stopped — max run time (${Math.round(maxRunMs / 60000)} min) reached with ${completeCount}/${chunks.length} chunk(s) complete. ` +
         `Cursor NOT advanced; next trigger re-covers [${from.toISOString()} → ${to.toISOString()}] and dedup-skips what already landed.`);
       throw new Error(`Scheduled window incomplete: max run time reached (${completeCount}/${chunks.length} chunks complete)`);
     }
+    finalizeProgress('FAILED');
     pipelineLog(pipeline.id, 'error',
       `Scheduled window INCOMPLETE — ${completeCount}/${chunks.length} chunk(s) complete, ${failed.length} failed. ` +
       `Cursor NOT advanced; next trigger re-covers [${from.toISOString()} → ${to.toISOString()}].`);
@@ -910,6 +951,7 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
     totals.inserted, totals.inserted, totals.skipped, totals.dlq
   );
 
+  finalizeProgress('COMPLETE');
   pipelineLog(pipeline.id, 'info',
     `Scheduled run complete — window fully ingested [${from.toISOString()} → ${to.toISOString()}] · ` +
     `fetched ${totals.fetched}, inserted ${totals.inserted}, skipped ${totals.skipped} (dedup), dlq ${totals.dlq} · ` +

@@ -81,6 +81,7 @@ export const api = {
   getPartitions: (id) => req('GET', `/pipelines/${id}/partitions`),
   resetPartitionCursor: (id, indexName) => req('DELETE', `/pipelines/${id}/partitions/${encodeURIComponent(indexName)}/cursor`),
   reconcile: (id, from, to) => req('POST', `/pipelines/${id}/reconcile`, { from, to }),
+  getRunProgress: (id) => req('GET', `/pipelines/${id}/progress`),
 
   // ClickHouse DDL
   execSql: (clusterId, sql) => req('POST', `/clusters/${clusterId}/exec`, { sql }),

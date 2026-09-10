@@ -207,6 +207,137 @@ function MetricsBar({ metrics, chUncompressedTotal }) {
   );
 }
 
+// ── Live run progress (chunk-queue, in-memory; polled) ─────────────────────────
+
+const WORKER_STATUS_STYLE = {
+  IDLE:       'text-slate-500',
+  PROCESSING: 'text-brand-400',
+  RETRYING:   'text-amber-400',
+  COMPLETED:  'text-emerald-400',
+  FAILED:     'text-red-400',
+};
+const FINAL_STATUS_STYLE = {
+  COMPLETE:   'bg-emerald-950 text-emerald-400 border-emerald-800/60',
+  INCOMPLETE: 'bg-amber-950 text-amber-400 border-amber-800/60',
+  FAILED:     'bg-red-950 text-red-400 border-red-800/60',
+  CANCELLED:  'bg-slate-800 text-slate-400 border-slate-700',
+};
+// Compact chunk-boundary label: HH:MM for short windows, MM/DD HH:MM when the window
+// spans more than a day (so multi-day backfill chunks don't read as "12:29–10:14").
+function chunkTime(iso, multiDay) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return multiDay ? `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${hm}` : hm;
+}
+
+function RunProgress({ pipelineId, isRunning }) {
+  const [prog, setProg] = useState(null);
+  const [showChunks, setShowChunks] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    let timer;
+    const tick = async () => {
+      try {
+        const s = await api.getRunProgress(pipelineId);
+        if (alive) setProg(s);
+      } catch { /* ignore transient */ }
+      // Poll fast while a run is live, slowly once it's terminal (to catch the next run).
+      const delay = (prog?.running || isRunning) ? 1200 : 5000;
+      if (alive) timer = setTimeout(tick, delay);
+    };
+    tick();
+    return () => { alive = false; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pipelineId, isRunning, prog?.running]);
+
+  if (!prog) return null; // no chunk-queue run recorded for this pipeline
+
+  const maxCompleted = Math.max(1, ...prog.workers.map(w => w.completed));
+  const multiDay = (new Date(prog.window.to) - new Date(prog.window.from)) > 24 * 3600 * 1000;
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+          <Activity size={11} /> Run Progress
+          {prog.running
+            ? <span className="text-[10px] font-normal text-brand-400 normal-case tracking-normal animate-pulse">live</span>
+            : prog.final_status && (
+                <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full border normal-case tracking-normal ${FINAL_STATUS_STYLE[prog.final_status] || 'bg-slate-800 text-slate-400 border-slate-700'}`}>
+                  {prog.final_status}
+                </span>
+              )}
+        </div>
+        <div className="text-[10px] text-slate-500">
+          {prog.index_routed
+            ? `index-routed · ${prog.indices_discovered} indices`
+            : 'full-pattern'}
+          {prog.max_run_minutes > 0 && ` · max ${prog.max_run_minutes}m`}
+        </div>
+      </div>
+
+      {/* Window + overall */}
+      <div className="text-[10px] text-slate-500 mb-1.5">
+        Window: <span className="font-mono text-slate-400">{fmtTs(prog.window.from)} → {fmtTs(prog.window.to)}</span>
+        {'  ·  '}{prog.worker_count} workers · {prog.chunk_count} chunks
+      </div>
+      <div className="flex items-center gap-2 mb-2.5">
+        <div className="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all ${prog.failed > 0 ? 'bg-amber-500' : prog.running ? 'bg-brand-500' : 'bg-emerald-500'}`}
+            style={{ width: `${prog.pct}%` }}
+          />
+        </div>
+        <span className="text-xs tabular-nums text-slate-300 font-medium">{prog.complete}/{prog.total} ({prog.pct}%)</span>
+        {prog.failed > 0 && <span className="text-[10px] text-red-400">{prog.failed} failed</span>}
+      </div>
+
+      {/* Per-worker bars — reflects the actual shared queue (completed counts differ) */}
+      <div className="space-y-1">
+        {prog.workers.map(w => (
+          <div key={w.id} className="flex items-center gap-2 text-[11px]">
+            <span className="w-14 flex-shrink-0 text-slate-400 font-mono">W{w.id}</span>
+            <span className={`w-20 flex-shrink-0 font-medium ${WORKER_STATUS_STYLE[w.status] || 'text-slate-500'}`}>{w.status}</span>
+            <div className="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+              <div className="h-full bg-brand-500/70 rounded-full transition-all" style={{ width: `${(w.completed / maxCompleted) * 100}%` }} />
+            </div>
+            <span className="w-10 flex-shrink-0 text-right tabular-nums text-slate-400">{w.completed}</span>
+            <span className="w-40 flex-shrink-0 text-slate-500 font-mono truncate">
+              {w.current_range ? `#${w.current_chunk} ${chunkTime(w.current_range.gte, multiDay)}–${chunkTime(w.current_range.end, multiDay)}` : (w.retries > 0 ? `${w.retries} retries` : '')}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {/* Chunk breakdown (collapsible) */}
+      <button
+        onClick={() => setShowChunks(s => !s)}
+        className="mt-2 flex items-center gap-1 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
+      >
+        {showChunks ? <ChevronUp size={11} /> : <ChevronDown size={11} />} Chunk breakdown ({prog.total})
+      </button>
+      {showChunks && (
+        <div className="mt-1.5 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-1">
+          {prog.chunks.map(c => {
+            const col = c.state === 'COMPLETE' ? 'bg-emerald-950/40 border-emerald-800/50 text-emerald-300'
+              : c.state === 'IN_PROGRESS' ? 'bg-brand-950/40 border-brand-800/50 text-brand-300'
+              : c.state === 'FAILED' ? 'bg-red-950/40 border-red-800/50 text-red-300'
+              : 'bg-slate-800/40 border-slate-700 text-slate-400';
+            return (
+              <div key={c.id} className={`px-2 py-1 rounded border text-[10px] font-mono ${col}`} title={`${c.state} · routed ${c.indices ?? 'all'} idx · inserted ${c.inserted}`}>
+                #{c.id} {chunkTime(c.gte, multiDay)}–{chunkTime(c.end, multiDay)}
+                {c.redistributions > 0 && <span className="text-amber-400"> ↻{c.redistributions}</span>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Checkpoint / detail panel ─────────────────────────────────────────────────
 
 function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRunReconcile, onResetPartitionCursor }) {
@@ -360,6 +491,9 @@ function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRun
           </div>
         </div>
       )}
+
+      {/* Live run progress (chunk-queue) */}
+      <RunProgress pipelineId={p.id} isRunning={p.is_running} />
 
       {/* Reconciliation */}
       <div>
