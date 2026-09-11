@@ -263,7 +263,11 @@ function transformDoc(doc, pipeline) {
       default:    val = null;
     }
     if (val !== null && typeof val === 'object' && !Array.isArray(val)) val = JSON.stringify(val);
-    if (val === undefined || val === null || val === '') continue;
+    // FortiGate emits "N/A" as a placeholder for absent numeric fields (e.g. srcport,
+    // dstport, sentbyte on subtype:system event logs). Feeding "N/A" to a UInt/DateTime
+    // column throws Code 27 CANNOT_PARSE and kills the whole JSONEachRow batch. Treat it
+    // as empty so the column's default applies; raw_data still keeps the original value.
+    if (val === undefined || val === null || val === '' || val === 'N/A') continue;
     row[m.dest] = val;
   }
 
