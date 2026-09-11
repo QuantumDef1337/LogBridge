@@ -221,7 +221,10 @@ function transformDoc(doc, pipeline) {
     if (val !== null && typeof val === 'object' && !Array.isArray(val)) val = JSON.stringify(val);
     // Omit missing/empty values so the column's ClickHouse DEFAULT applies.
     // (Sending "" to a DateTime/UInt column throws CANNOT_PARSE_DATETIME.)
-    if (val === undefined || val === null || val === '') continue;
+    // FortiGate also emits "N/A" for absent numeric fields (srcport, dstport, sentbyte
+    // on subtype:system logs); feeding that to a UInt column throws Code 27 and kills the
+    // whole batch, so treat it as empty too. raw_data still keeps the original value.
+    if (val === undefined || val === null || val === '' || val === 'N/A') continue;
     row[m.dest] = val;
   }
 
