@@ -256,6 +256,17 @@ function transformDoc(doc, pipeline) {
   return row;
 }
 
+// Date-range windows are picked at minute granularity in the UI. OpenSearch rounds a
+// minute-precision `lte` bound (e.g. "…T23:59") UP to the end of that minute
+// (23:59:59.999), so reconciliation counts the whole final minute. The ingestion chunker,
+// however, parses the same value with new Date() to an exact instant (23:59:00.000) and
+// uses it as an EXCLUSIVE upper bound — silently dropping 23:59:00.001–23:59:59.999
+// (~one minute of events). Advance the window end to the START OF THE NEXT MINUTE so the
+// selected final minute is fully included and ingestion matches reconciliation.
+function dateRangeEndExclusive(d) {
+  return new Date(Math.floor(d.getTime() / 60000) * 60000 + 60000);
+}
+
 // Build the OpenSearch time-range filter from the pipeline's pull mode.
 function buildRange(pipeline) {
   const range = {};
@@ -263,7 +274,8 @@ function buildRange(pipeline) {
     range.gte = pipeline.pull_from_date;
   } else if (pipeline.pull_mode === 'date_range') {
     if (pipeline.pull_from_date) range.gte = pipeline.pull_from_date;
-    if (pipeline.pull_to_date) range.lte = pipeline.pull_to_date;
+    // Exclusive next-minute upper bound so the selected final minute is not truncated.
+    if (pipeline.pull_to_date) range.lt = dateRangeEndExclusive(new Date(pipeline.pull_to_date)).toISOString();
   }
   return range;
 }
@@ -916,4 +928,4 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
     durationSec: Math.round(durationSec), avgRowsPerSec: avgRate };
 }
 
-module.exports = { runPipelineOnce, runIndexPartition, runScheduledSlices, transformDoc, buildRange };
+module.exports = { runPipelineOnce, runIndexPartition, runScheduledSlices, transformDoc, buildRange, dateRangeEndExclusive };
