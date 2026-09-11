@@ -389,9 +389,15 @@ router.post('/:id/reconcile', async (req, res) => {
     fromDate = pipeline.pull_from_date; toDate = null;
   } // continuous / scheduled → no bounds (compare the whole index)
 
+  // Use an EXCLUSIVE next-minute upper bound so source and sink count the same window.
+  // OpenSearch rounds a minute-precision `lte` UP to end-of-minute, while ClickHouse `<=`
+  // is exact — so a minute-precision "to" made the card show a false gap (e.g. 7,239 vs
+  // 118). Advancing to the next-minute boundary and comparing with `<` on both sides makes
+  // them symmetric, and matches the ingestion window (runner.dateRangeEndExclusive).
+  const toExclusive = toDate ? runner.dateRangeEndExclusive(new Date(toDate)) : null;
   const range = {};
   if (fromDate) range.gte = fromDate;
-  if (toDate) range.lte = toDate;
+  if (toExclusive) range.lt = toExclusive.toISOString();
 
   // Scope the source count to the physically-selected indexes if any, else the pattern.
   let indexList;
@@ -409,7 +415,8 @@ router.post('/:id/reconcile', async (req, res) => {
     const toChDate = (s) => s.replace(/'/g, '').replace('T', ' ').replace(/Z$/, '') + (s.includes(':') && s.split(':').length < 3 ? ':00' : '');
     const parts = [];
     if (fromDate) parts.push(`timestamp >= '${toChDate(fromDate)}'`);
-    if (toDate) parts.push(`timestamp <= '${toChDate(toDate)}'`);
+    // Exclusive next-minute upper bound (UTC wall-clock), symmetric with the source query.
+    if (toExclusive) parts.push(`timestamp < '${toExclusive.toISOString().slice(0, 19).replace('T', ' ')}'`);
     dest = await ch_svc.getRangeStats(cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, parts.join(' AND '));
   } catch (e) {
     error = (error ? error + '; ' : '') + `ClickHouse: ${e.message}`;

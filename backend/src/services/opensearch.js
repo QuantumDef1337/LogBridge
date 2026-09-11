@@ -304,6 +304,7 @@ async function getRangeStats(conn, indexPattern, range = {}, tsField = '@timesta
   const tsRange = {};
   if (range.gte) tsRange.gte = range.gte;
   if (range.lte) tsRange.lte = range.lte;
+  if (range.lt)  tsRange.lt  = range.lt;   // exclusive upper bound (matches ingestion window)
   const filter = Object.keys(tsRange).length
     ? [{ range: { [tsField]: { ...tsRange, format: 'strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSS||yyyy-MM-dd' } } }]
     : [];
