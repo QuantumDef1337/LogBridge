@@ -423,6 +423,7 @@ async function runPipelineOnce(conn, cluster, pipeline, opts = {}) {
 
       // ── DEDUP CHECK on combined accumulated rows ───────────────────────────
       let insertRows = accumRows;
+      let dedupCheckFailed = false;
       const batchEventIds = accumRows.map(r => r.event_id).filter(Boolean);
       if (batchEventIds.length > 0) {
         try {
@@ -435,16 +436,27 @@ async function runPipelineOnce(conn, cluster, pipeline, opts = {}) {
             skipped += accumRows.length - insertRows.length;
           }
         } catch (e) {
-          if (e.dedupUnsupported && !dedupWarned) {
-            dedupWarned = true;
-            pipelineLog(pipeline.id, 'warn', e.message);
+          if (e.dedupUnsupported) {
+            // No event_id column — dedup is impossible for this pipeline. There is no key
+            // to dedup on, so inserting is unavoidable; surfaced loudly, warned once.
+            if (!dedupWarned) { dedupWarned = true; pipelineLog(pipeline.id, 'warn', e.message); }
           } else if (e.dedupFallback) {
-            pipelineLog(pipeline.id, 'warn', e.message);
-          } else if (!e.dedupUnsupported) {
+            // Dedup CHECK failed after retries (ClickHouse overloaded/unreachable).
+            // Never insert without a dedup check — that silently reintroduces duplicates.
+            // Route the whole batch to the DLQ instead (preserved for reprocessing).
+            dedupCheckFailed = true;
+            if (!dedupWarned) { dedupWarned = true; pipelineLog(pipeline.id, 'warn', e.message); }
+          } else {
             throw e;
           }
-          // dedup unsupported / fallback → fall through and insert without a dedup check
         }
+      }
+
+      // Dedup check failed → DLQ the raw batch, insert nothing (no blind insert = no duplicates).
+      if (dedupCheckFailed) {
+        toDlq(pipeline.id, accumDocs, { message: 'dedup check failed — batch routed to DLQ to avoid inserting without dedup', category: 'dedup_check_failed' });
+        accumDlq += accumRows.length;
+        insertRows = [];
       }
 
       // ── WRITE: single CH insert for all accumulated OS pages ──────────────
@@ -726,9 +738,10 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
   }
 
   // Dedup + insert one batch of transformed rows; updates chunk stats and logs throughput.
-  async function flushChunkBatch(workerId, chunk, rows, cycleStart) {
+  async function flushChunkBatch(workerId, chunk, rows, docs, cycleStart) {
     if (!rows.length) return;
     let insertRows = rows;
+    let dedupCheckFailed = false;
     const eventIds = rows.map(r => r.event_id).filter(Boolean);
     if (eventIds.length > 0) {
       try {
@@ -741,17 +754,26 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
           chunk.skipped += rows.length - insertRows.length;
         }
       } catch (e) {
-        if (e.dedupUnsupported && !dedupWarned) {
-          dedupWarned = true;
-          pipelineLog(pipeline.id, 'warn', e.message);
+        if (e.dedupUnsupported) {
+          // No event_id column — dedup is impossible for this pipeline. There is no key
+          // to dedup on, so inserting is unavoidable; surfaced loudly, warned once.
+          if (!dedupWarned) { dedupWarned = true; pipelineLog(pipeline.id, 'warn', e.message); }
         } else if (e.dedupFallback) {
-          // Transient ClickHouse error after retries — log once per chunk, insert without dedup.
-          pipelineLog(pipeline.id, 'warn', e.message);
-        } else if (!e.dedupUnsupported) {
+          // Dedup CHECK failed after retries (ClickHouse overloaded/unreachable).
+          // Never insert without a dedup check — that silently reintroduces duplicates.
+          // Route the whole batch to the DLQ instead (preserved for reprocessing).
+          dedupCheckFailed = true;
+          if (!dedupWarned) { dedupWarned = true; pipelineLog(pipeline.id, 'warn', e.message); }
+        } else {
           throw e;
         }
-        // dedup unsupported / fallback → insert without a dedup check
       }
+    }
+    // Dedup check failed → DLQ the raw batch, insert nothing (no blind insert = no duplicates).
+    if (dedupCheckFailed) {
+      toDlq(pipeline.id, docs || [], { message: 'dedup check failed — batch routed to DLQ to avoid inserting without dedup', category: 'dedup_check_failed' });
+      chunk.dlq += rows.length;
+      return;
     }
     if (!insertRows.length) return;
     const ndjson = insertRows.map(r => JSON.stringify(r)).join('\n');
@@ -814,7 +836,7 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
           catch (e) { toDlq(pipeline.id, [d], { message: e.message, category: 'transform' }); chunk.dlq++; }
         }
         chunk.fetched += page.docs.length;
-        await flushChunkBatch(workerId, chunk, rows, cycleStart);
+        await flushChunkBatch(workerId, chunk, rows, page.docs, cycleStart);
         // Advance the durable cursor ONLY after the page's rows are safely inserted.
         chunk.cursorTs = page.nextCursor.ts;
         chunk.cursorId = page.nextCursor.id;

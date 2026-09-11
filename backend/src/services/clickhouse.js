@@ -129,7 +129,7 @@ async function getExistingEventIds(cluster, database, table, eventIds) {
   // falling back to "insert anyway". Without retries a 429 storm silently disables
   // dedup for the entire batch, letting duplicate rows accumulate.
   let lastErr;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     try {
       const res = await query(cluster, sql);
       return (res.data || []).map(r => r.event_id);
@@ -140,12 +140,13 @@ async function getExistingEventIds(cluster, database, table, eventIds) {
         throw err;
       }
       lastErr = e;
-      if (attempt < 2) await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+      if (attempt < 4) await new Promise(r => setTimeout(r, Math.min(500 * 2 ** attempt, 8000)));
     }
   }
-  // All retries exhausted — log and fall through (insert without dedup check) so
-  // ingestion is not blocked, but the caller will see this in the warn log.
-  const fallbackErr = new Error(`dedup check failed after 3 attempts (${lastErr?.message?.slice(0, 80)}) — inserting without dedup`);
+  // All retries exhausted — signal the caller to route the batch to the DLQ rather than
+  // inserting without a dedup check. Inserting blind here silently reintroduces duplicates
+  // (this is exactly how a ClickHouse-overload window produced duplicate rows before).
+  const fallbackErr = new Error(`dedup check failed after 5 attempts (${lastErr?.message?.slice(0, 80)}) — routing batch to DLQ (not inserting without dedup)`);
   fallbackErr.dedupFallback = true;
   throw fallbackErr;
 }
