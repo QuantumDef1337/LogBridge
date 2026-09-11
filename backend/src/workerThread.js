@@ -125,7 +125,11 @@ async function fetchPage(conn, pitId, pageSize, cursorTs, cursorId, range, tsFie
     track_total_hits: false,
     sort: [{ [tsField]: 'asc' }, { _id: 'asc' }],
     pit: { id: pitId, keep_alive: '5m' },
-    query: { range: { [tsField]: range } },
+    // Tell OpenSearch how to parse the range boundary values (ISO from the chunker) so it
+    // does not fall back to the field's own mapping format. Required for Graylog-style
+    // `timestamp` fields stored as "yyyy-MM-dd HH:mm:ss.SSS" (no T/Z), which otherwise
+    // reject the ISO boundaries with a parse_exception. Mirrors services/opensearch.js.
+    query: { range: { [tsField]: { ...range, format: 'strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSS||yyyy-MM-dd' } } },
   };
   if (cursorTs != null) body.search_after = [cursorTs, cursorId ?? ''];
 
