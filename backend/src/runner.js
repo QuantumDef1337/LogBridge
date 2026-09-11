@@ -424,6 +424,7 @@ async function runPipelineOnce(conn, cluster, pipeline, opts = {}) {
 
       // ── DEDUP CHECK on combined accumulated rows ───────────────────────────
       let insertRows = accumRows;
+      let dedupCheckFailed = false;
       const batchEventIds = accumRows.map(r => r.event_id).filter(Boolean);
       if (batchEventIds.length > 0) {
         try {
@@ -436,16 +437,27 @@ async function runPipelineOnce(conn, cluster, pipeline, opts = {}) {
             skipped += accumRows.length - insertRows.length;
           }
         } catch (e) {
-          if (e.dedupUnsupported && !dedupWarned) {
-            dedupWarned = true;
-            pipelineLog(pipeline.id, 'warn', e.message);
+          if (e.dedupUnsupported) {
+            // No event_id column — dedup is impossible for this pipeline. There is no key
+            // to dedup on, so inserting is unavoidable; surfaced loudly, warned once.
+            if (!dedupWarned) { dedupWarned = true; pipelineLog(pipeline.id, 'warn', e.message); }
           } else if (e.dedupFallback) {
-            pipelineLog(pipeline.id, 'warn', e.message);
-          } else if (!e.dedupUnsupported) {
+            // Dedup CHECK failed after retries (ClickHouse overloaded/unreachable).
+            // Never insert without a dedup check — that silently reintroduces duplicates.
+            // Route the whole batch to the DLQ instead (preserved for reprocessing).
+            dedupCheckFailed = true;
+            if (!dedupWarned) { dedupWarned = true; pipelineLog(pipeline.id, 'warn', e.message); }
+          } else {
             throw e;
           }
-          // dedup unsupported / fallback → fall through and insert without a dedup check
         }
+      }
+
+      // Dedup check failed → DLQ the raw batch, insert nothing (no blind insert = no duplicates).
+      if (dedupCheckFailed) {
+        toDlq(pipeline.id, accumDocs, { message: 'dedup check failed — batch routed to DLQ to avoid inserting without dedup', category: 'dedup_check_failed' });
+        accumDlq += accumRows.length;
+        insertRows = [];
       }
 
       // ── WRITE: single CH insert for all accumulated OS pages ──────────────

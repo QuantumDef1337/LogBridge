@@ -191,7 +191,7 @@ async function getExistingEventIds(cluster, database, table, eventIds) {
   const inList = eventIds.map(id => `'${String(id).replace(/'/g, "''")}'`).join(',');
   const sql    = `SELECT event_id FROM \`${database}\`.\`${table}\` WHERE event_id IN (${inList})`;
   let lastErr;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     try {
       const res = await chQuery(cluster, sql);
       return (res.data || []).map(r => r.event_id);
@@ -202,10 +202,10 @@ async function getExistingEventIds(cluster, database, table, eventIds) {
         throw err;
       }
       lastErr = e;
-      if (attempt < 2) await sleep(500 * (attempt + 1));
+      if (attempt < 4) await sleep(Math.min(500 * 2 ** attempt, 8000));
     }
   }
-  const err = new Error(`dedup check failed after 3 attempts (${lastErr?.message?.slice(0, 80)}) — inserting without dedup`);
+  const err = new Error(`dedup check failed after 5 attempts (${lastErr?.message?.slice(0, 80)}) — routing batch to DLQ (not inserting without dedup)`);
   err.dedupFallback = true;
   throw err;
 }
@@ -364,6 +364,7 @@ async function ingestChunk(chunk, pipeline, conn, cluster, opts) {
 
       // Dedup check
       let insertRows = rows;
+      let dedupCheckFailed = false;
       const eventIds = rows.map(r => r.event_id).filter(Boolean);
       if (eventIds.length > 0) {
         try {
@@ -375,13 +376,26 @@ async function ingestChunk(chunk, pipeline, conn, cluster, opts) {
           }
         } catch (e) {
           if (e.dedupUnsupported) {
-            log('warn', e.message);
+            // No event_id column — dedup is impossible for this pipeline. There is no key
+            // to dedup on, so inserting is unavoidable; surfaced loudly, warned once.
+            if (!dedupFallbackLogged) { log('warn', e.message); dedupFallbackLogged = true; }
           } else if (e.dedupFallback) {
+            // Dedup CHECK failed after retries (ClickHouse overloaded/unreachable).
+            // Never insert without a dedup check — that silently reintroduces duplicates.
+            // Route the whole batch to the DLQ instead, preserved for reprocessing once healthy.
+            dedupCheckFailed = true;
             if (!dedupFallbackLogged) { log('warn', e.message); dedupFallbackLogged = true; }
           } else {
             throw e;
           }
         }
+      }
+
+      // Dedup check failed → DLQ the raw batch, insert nothing (no blind insert = no duplicates).
+      if (dedupCheckFailed) {
+        dlq(page.docs, { message: 'dedup check failed — batch routed to DLQ to avoid inserting without dedup', category: 'dedup_check_failed' });
+        dlqCount += page.docs.length;
+        insertRows = [];
       }
 
       if (insertRows.length > 0) {
