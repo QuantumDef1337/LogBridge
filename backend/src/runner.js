@@ -188,8 +188,8 @@ async function saveRunReconciliation(runId, pipeline, conn, cluster, fromTs, toT
       os.getRangeStats(conn, target, range, tsField),
       (async () => {
         const parts = [];
-        if (fromTs) parts.push(`timestamp >= '${fromTs.replace('T', ' ').replace(/Z$/, '').slice(0, 19)}'`);
-        if (toTs)   parts.push(`timestamp <= '${toTs.replace('T', ' ').replace(/Z$/, '').slice(0, 19)}'`);
+        if (fromTs) parts.push(`timestamp >= '${fromTs.replace('T', ' ').replace(/Z$/, '')}'`);
+        if (toTs)   parts.push(`timestamp <= '${toTs.replace('T', ' ').replace(/Z$/, '')}'`);
         return ch.getRangeStats(cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, parts.join(' AND '));
       })(),
     ]);
