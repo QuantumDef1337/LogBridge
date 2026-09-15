@@ -201,6 +201,34 @@ function initSchema() {
       UNIQUE(pipeline_id, index_name)
     );
     CREATE INDEX IF NOT EXISTS idx_pipeline_indexes_pid ON pipeline_indexes(pipeline_id);
+
+    -- Per-run history: one row per scheduler/manual trigger.
+    CREATE TABLE IF NOT EXISTS pipeline_runs (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      pipeline_id  INTEGER NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+      started_at   TEXT NOT NULL,
+      finished_at  TEXT,
+      from_ts      TEXT,
+      to_ts        TEXT,
+      status       TEXT DEFAULT 'running',  -- running | complete | failed | cancelled
+      fetched      INTEGER DEFAULT 0,
+      inserted     INTEGER DEFAULT 0,
+      skipped      INTEGER DEFAULT 0,
+      dlq          INTEGER DEFAULT 0,
+      error_msg    TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_pipeline_runs_pid ON pipeline_runs(pipeline_id, id DESC);
+
+    -- Immutable reconciliation snapshot taken once right after a run completes.
+    -- Never recalculated — this is the audit trail of what was counted at run time.
+    CREATE TABLE IF NOT EXISTS pipeline_run_reconciliation (
+      run_id            INTEGER PRIMARY KEY REFERENCES pipeline_runs(id) ON DELETE CASCADE,
+      source_count      INTEGER,
+      destination_count INTEGER,
+      remaining         INTEGER,
+      success_pct       REAL,
+      reconciled_at     TEXT NOT NULL
+    );
   `);
 
   // Enrich pipeline_status with durable-checkpoint fields (idempotent add-column migration).

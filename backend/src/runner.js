@@ -148,6 +148,71 @@ function pipelineLog(pipelineId, level, message) {
   } catch {}
 }
 
+// ── Per-run history helpers ───────────────────────────────────────────────────
+
+function startRunRecord(pipelineId, startedAt) {
+  try {
+    const r = getDb().prepare(
+      "INSERT INTO pipeline_runs (pipeline_id, started_at, status) VALUES (?, ?, 'running')"
+    ).run(pipelineId, startedAt);
+    return r.lastInsertRowid;
+  } catch { return null; }
+}
+
+function finishRunRecord(runId, { finishedAt, status, fromTs, toTs, fetched, inserted, skipped, dlq, errorMsg }) {
+  if (!runId) return;
+  try {
+    getDb().prepare(`
+      UPDATE pipeline_runs SET
+        finished_at=?, status=?, from_ts=?, to_ts=?,
+        fetched=?, inserted=?, skipped=?, dlq=?, error_msg=?
+      WHERE id=?
+    `).run(finishedAt, status, fromTs, toTs, fetched || 0, inserted || 0, skipped || 0, dlq || 0, errorMsg || null, runId);
+  } catch {}
+}
+
+// Compute reconciliation for the run's exact window and save as an immutable snapshot.
+// Called async after cursor advance — never blocks the run completion path.
+async function saveRunReconciliation(runId, pipeline, conn, cluster, fromTs, toTs) {
+  if (!runId) return;
+  try {
+    const tsField = pipeline.timestamp_field || '@timestamp';
+    let indexList;
+    try { indexList = JSON.parse(pipeline.index_set_filter || '[]'); } catch { indexList = []; }
+    const target = indexList.length ? indexList.join(',') : pipeline.index_pattern;
+
+    const range = {};
+    if (fromTs) range.gte = fromTs;
+    if (toTs) range.lte = toTs;
+
+    const [source, dest] = await Promise.allSettled([
+      os.getRangeStats(conn, target, range, tsField),
+      (async () => {
+        const parts = [];
+        if (fromTs) parts.push(`timestamp >= '${fromTs.replace('T', ' ').replace(/Z$/, '').slice(0, 19)}'`);
+        if (toTs)   parts.push(`timestamp <= '${toTs.replace('T', ' ').replace(/Z$/, '').slice(0, 19)}'`);
+        return ch.getRangeStats(cluster, pipeline.clickhouse_database, pipeline.clickhouse_table, parts.join(' AND '));
+      })(),
+    ]);
+
+    const srcCount  = source.status  === 'fulfilled' ? (source.value?.count  ?? null) : null;
+    const destCount = dest.status    === 'fulfilled' ? (dest.value?.count    ?? null) : null;
+    const remaining = (srcCount !== null && destCount !== null) ? Math.max(0, srcCount - destCount) : null;
+    const successPct = (srcCount !== null && destCount !== null && srcCount > 0)
+      ? Math.round((Math.min(destCount, srcCount) / srcCount) * 1000) / 10
+      : (srcCount === 0 ? 100 : null);
+
+    getDb().prepare(`
+      INSERT OR REPLACE INTO pipeline_run_reconciliation
+        (run_id, source_count, destination_count, remaining, success_pct, reconciled_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(runId, srcCount, destCount, remaining, successPct, new Date().toISOString());
+  } catch (e) {
+    // Reconciliation failure must never crash the run — just log it.
+    try { pipelineLog(pipeline.id, 'warn', `Run #${runId} reconciliation failed: ${e.message}`); } catch {}
+  }
+}
+
 // Read a nested field by dot-path, e.g. "agent.name" or "@timestamp"
 function getNested(doc, path) {
   if (!path) return undefined;
@@ -615,6 +680,8 @@ const RUN_CANCELLED = Symbol('run-cancelled');
 async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
   const db = getDb();
   const runStartMs = Date.now(); // wall-clock run start, for the completion summary
+  const runStartedAt = new Date(runStartMs).toISOString();
+  const runId = startRunRecord(pipeline.id, runStartedAt);
   let dedupWarned = false; // shared across all workers — log the "dedup disabled" warning once per run
   const workerCount = Math.max(1, Math.min(pipeline.parallel_slices || 1, 10));
   const tsField = pipeline.timestamp_field || '@timestamp';
@@ -858,6 +925,7 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
   // Pause: never advance the cursor on a cancelled run — the window is not finished.
   if (cancelToken?.cancelled) {
     finalizeProgress('CANCELLED');
+    finishRunRecord(runId, { finishedAt: new Date().toISOString(), status: 'cancelled', fromTs: from.toISOString(), toTs: to.toISOString(), ...totals });
     pipelineLog(pipeline.id, 'warn',
       `Run paused — ${completeCount}/${chunks.length} chunk(s) complete. Cursor NOT advanced; next run re-covers [${from.toISOString()} → ${to.toISOString()}].`);
     return { ...totals, from, to, chunks: chunks.length, complete: completeCount, failed: failed.length, cancelled: true };
@@ -872,12 +940,14 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
   if (failed.length > 0) {
     if (deadlineHit()) {
       finalizeProgress('INCOMPLETE');
+      finishRunRecord(runId, { finishedAt: new Date().toISOString(), status: 'failed', fromTs: from.toISOString(), toTs: to.toISOString(), ...totals, errorMsg: `Max run time reached (${completeCount}/${chunks.length} chunks complete)` });
       pipelineLog(pipeline.id, 'warn',
         `Run stopped — max run time (${Math.round(maxRunMs / 60000)} min) reached with ${completeCount}/${chunks.length} chunk(s) complete. ` +
         `Cursor NOT advanced; next trigger re-covers [${from.toISOString()} → ${to.toISOString()}] and dedup-skips what already landed.`);
       throw new Error(`Scheduled window incomplete: max run time reached (${completeCount}/${chunks.length} chunks complete)`);
     }
     finalizeProgress('FAILED');
+    finishRunRecord(runId, { finishedAt: new Date().toISOString(), status: 'failed', fromTs: from.toISOString(), toTs: to.toISOString(), ...totals, errorMsg: `${failed.length}/${chunks.length} chunks failed after retries` });
     pipelineLog(pipeline.id, 'error',
       `Scheduled window INCOMPLETE — ${completeCount}/${chunks.length} chunk(s) complete, ${failed.length} failed. ` +
       `Cursor NOT advanced; next trigger re-covers [${from.toISOString()} → ${to.toISOString()}].`);
@@ -905,8 +975,14 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
 
   finalizeProgress('COMPLETE');
 
-  // ── Detailed completion summary: wall-clock start/end, duration, avg speed ────
   const endMs = Date.now();
+  finishRunRecord(runId, { finishedAt: new Date(endMs).toISOString(), status: 'complete', fromTs: from.toISOString(), toTs: to.toISOString(), ...totals });
+  // Fire reconciliation async — never blocks run completion.
+  if (pipeline.clickhouse_table && pipeline.clickhouse_database) {
+    setImmediate(() => saveRunReconciliation(runId, pipeline, conn, cluster, from.toISOString(), to.toISOString()));
+  }
+
+  // ── Detailed completion summary: wall-clock start/end, duration, avg speed ────
   const durationSec = Math.max(0.001, (endMs - runStartMs) / 1000);
   const fmtDur = (s) => s < 60 ? `${s.toFixed(1)}s`
     : s < 3600 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`

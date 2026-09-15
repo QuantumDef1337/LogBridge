@@ -47,6 +47,277 @@ function scheduleExample(cron, lookback) {
   return `At each trigger, pulls the ${lookback}h window ending at trigger time`;
 }
 
+// ── Visual Schedule Builder helpers ──────────────────────────────────────────
+
+function compactDays(days) {
+  if (!days || days.length === 0) return '*';
+  const sorted = [...days].sort((a, b) => a - b);
+  if (sorted.length === 7) return '*';
+  const segs = [];
+  let start = sorted[0], end = sorted[0];
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i] === end + 1) { end = sorted[i]; }
+    else {
+      segs.push(end - start >= 2 ? `${start}-${end}` : start === end ? `${start}` : `${start},${end}`);
+      start = end = sorted[i];
+    }
+  }
+  segs.push(end - start >= 2 ? `${start}-${end}` : start === end ? `${start}` : `${start},${end}`);
+  return segs.join(',');
+}
+
+function buildCron(b) {
+  switch (b.type) {
+    case 'every_minutes': return `*/${b.n} * * * *`;
+    case 'every_hours':   return `0 */${b.n} * * *`;
+    case 'daily':         return `${b.minute} ${b.hour} * * *`;
+    case 'weekly':        return `${b.minute} ${b.hour} * * ${compactDays(b.days)}`;
+    case 'monthly':       return `${b.minute} ${b.hour} ${b.dom} * *`;
+    default:              return '0 0 * * *';
+  }
+}
+
+const CB_DAY_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+function fmtTime12(hour, minute) {
+  const h12 = hour % 12 || 12;
+  const ampm = hour < 12 ? 'AM' : 'PM';
+  return `${h12}:${String(minute).padStart(2,'0')} ${ampm}`;
+}
+
+function ordinalSuffix(n) {
+  const s = ['th','st','nd','rd'];
+  const v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+}
+
+function describeCron(b) {
+  switch (b.type) {
+    case 'every_minutes': return `Runs every ${b.n} minute${b.n !== 1 ? 's' : ''}`;
+    case 'every_hours':   return `Runs every ${b.n} hour${b.n !== 1 ? 's' : ''}`;
+    case 'daily':         return `Runs every day at ${fmtTime12(b.hour, b.minute)}`;
+    case 'weekly': {
+      if (!b.days || b.days.length === 0) return 'Select at least one day';
+      const sorted = [...b.days].sort((a, c) => a - c);
+      const t = fmtTime12(b.hour, b.minute);
+      if (sorted.length === 7) return `Runs every day at ${t}`;
+      if (sorted.length === 5 && sorted.every((d, i) => d === i + 1)) return `Runs every weekday at ${t}`;
+      if (sorted.length === 2 && sorted[0] === 0 && sorted[1] === 6) return `Runs on weekends at ${t}`;
+      const names = sorted.map(d => CB_DAY_NAMES[d]);
+      const last = names.pop();
+      return `Runs every ${names.length ? names.join(', ') + ' and ' + last : last} at ${t}`;
+    }
+    case 'monthly': return `Runs on the ${ordinalSuffix(b.dom)} of every month at ${fmtTime12(b.hour, b.minute)}`;
+    default: return '';
+  }
+}
+
+function lookbackToHours(value, unit) {
+  if (unit === 'minutes') return value / 60;
+  if (unit === 'days') return value * 24;
+  return value;
+}
+
+function suggestLookback(b) {
+  switch (b.type) {
+    case 'every_minutes': return { value: b.n, unit: 'minutes' };
+    case 'every_hours':   return { value: b.n, unit: 'hours' };
+    case 'daily':         return { value: 24, unit: 'hours' };
+    case 'weekly':        return { value: 7, unit: 'days' };
+    case 'monthly':       return { value: 30, unit: 'days' };
+    default:              return { value: 24, unit: 'hours' };
+  }
+}
+
+function validateBuilder(b) {
+  switch (b.type) {
+    case 'every_minutes':
+      if (!b.n || b.n < 1 || b.n > 59) return 'Interval must be 1–59 minutes.';
+      break;
+    case 'every_hours':
+      if (!b.n || b.n < 1 || b.n > 23) return 'Interval must be 1–23 hours.';
+      break;
+    case 'daily':
+      if (b.hour < 0 || b.hour > 23) return 'Hour must be 0–23.';
+      if (b.minute < 0 || b.minute > 59) return 'Minute must be 0–59.';
+      break;
+    case 'weekly':
+      if (!b.days || b.days.length === 0) return 'Select at least one day of the week.';
+      if (b.hour < 0 || b.hour > 23) return 'Hour must be 0–23.';
+      if (b.minute < 0 || b.minute > 59) return 'Minute must be 0–59.';
+      break;
+    case 'monthly':
+      if (!b.dom || b.dom < 1 || b.dom > 28) return 'Day must be 1–28.';
+      if (b.hour < 0 || b.hour > 23) return 'Hour must be 0–23.';
+      if (b.minute < 0 || b.minute > 59) return 'Minute must be 0–59.';
+      break;
+  }
+  return null;
+}
+
+// Efficient next-run calculator for visual builder types (no scanning loop)
+function nextRunFromBuilder(b) {
+  const now = new Date();
+  switch (b.type) {
+    case 'every_minutes': {
+      const n = b.n || 1;
+      const elapsed = now.getMinutes() % n;
+      const wait = elapsed === 0 ? n : n - elapsed;
+      const d = new Date(now.getTime() + wait * 60000);
+      d.setSeconds(0, 0);
+      return d;
+    }
+    case 'every_hours': {
+      const n = b.n || 1;
+      const elapsed = now.getHours() % n;
+      const wait = elapsed === 0 ? n : n - elapsed;
+      const d = new Date(now.getTime() + wait * 3600000);
+      d.setMinutes(0, 0, 0);
+      return d;
+    }
+    case 'daily': {
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), b.hour, b.minute, 0, 0);
+      if (d <= now) d.setDate(d.getDate() + 1);
+      return d;
+    }
+    case 'weekly': {
+      if (!b.days || b.days.length === 0) return null;
+      const sorted = [...b.days].sort((a, c) => a - c);
+      for (let i = 0; i < 8; i++) {
+        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i, b.hour, b.minute, 0, 0);
+        if (d > now && sorted.includes(d.getDay())) return d;
+      }
+      return null;
+    }
+    case 'monthly': {
+      for (let m = 0; m < 3; m++) {
+        const d = new Date(now.getFullYear(), now.getMonth() + m, b.dom, b.hour, b.minute, 0, 0);
+        if (d > now) return d;
+      }
+      return null;
+    }
+    default: return null;
+  }
+}
+
+// Parses one cron field into a Set of allowed values, or null for '*'
+function parseCronFieldFE(field, min, max) {
+  if (field === '*') return null;
+  const vals = new Set();
+  for (const part of field.split(',')) {
+    if (part.includes('/')) {
+      const [range, step] = part.split('/');
+      const s = parseInt(step);
+      if (!s) return null;
+      const [lo, hi] = range === '*' ? [min, max] : range.split('-').map(Number);
+      for (let v = (isNaN(lo) ? min : lo); v <= (isNaN(hi) ? max : hi); v += s) vals.add(v);
+    } else if (part.includes('-')) {
+      const [lo, hi] = part.split('-').map(Number);
+      for (let v = lo; v <= hi; v++) vals.add(v);
+    } else {
+      const n = parseInt(part);
+      if (!isNaN(n)) vals.add(n);
+    }
+  }
+  return vals;
+}
+
+// Generic minute-by-minute scanner for Advanced Cron validation (up to maxDays out)
+function nextCronRunGeneric(expr, maxDays = 35) {
+  const parts = (expr || '').trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  try {
+    const [minF, hourF, domF, monF, dowF] = parts;
+    const minsAllowed  = parseCronFieldFE(minF,  0, 59);
+    const hoursAllowed = parseCronFieldFE(hourF, 0, 23);
+    const domsAllowed  = parseCronFieldFE(domF,  1, 31);
+    const monsAllowed  = parseCronFieldFE(monF,  1, 12);
+    const dowsAllowed  = parseCronFieldFE(dowF,  0, 6);
+    const limit = maxDays * 24 * 60;
+    const start = new Date();
+    start.setSeconds(0, 0);
+    start.setTime(start.getTime() + 60000);
+    for (let i = 0; i < limit; i++) {
+      const d = new Date(start.getTime() + i * 60000);
+      if (monsAllowed  && !monsAllowed.has(d.getMonth() + 1)) continue;
+      if (domsAllowed  && !domsAllowed.has(d.getDate()))      continue;
+      if (dowsAllowed  && !dowsAllowed.has(d.getDay()))       continue;
+      if (hoursAllowed && !hoursAllowed.has(d.getHours()))    continue;
+      if (minsAllowed  && !minsAllowed.has(d.getMinutes()))   continue;
+      return d;
+    }
+    return null;
+  } catch { return null; }
+}
+
+// Convert stored schedule_lookback_hours back to a UI-friendly value+unit pair
+function hoursToLookback(h) {
+  if (h < 1) return { value: Math.max(1, Math.round(h * 60)), unit: 'minutes' };
+  if (h >= 24 && h % 24 === 0) return { value: h / 24, unit: 'days' };
+  return { value: h, unit: 'hours' };
+}
+
+// Try to reverse-engineer a cron string back into cronBuilder state.
+// Returns a builder object if the cron matches a visual pattern, null otherwise.
+function parseCronToBuilder(cron) {
+  const parts = (cron || '').trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [minF, hourF, domF, monthF, dowF] = parts;
+  const isNum = s => /^\d+$/.test(s);
+
+  // every_minutes: */N * * * *
+  const evMin = minF.match(/^\*\/(\d+)$/);
+  if (evMin && hourF === '*' && domF === '*' && monthF === '*' && dowF === '*') {
+    const n = parseInt(evMin[1]);
+    if (n >= 1 && n <= 59) return { type: 'every_minutes', n, hour: 0, minute: 0, days: [1,2,3,4,5], dom: 1 };
+  }
+
+  // every_hours: 0 */N * * *
+  const evHr = hourF.match(/^\*\/(\d+)$/);
+  if (minF === '0' && evHr && domF === '*' && monthF === '*' && dowF === '*') {
+    const n = parseInt(evHr[1]);
+    if (n >= 1 && n <= 23) return { type: 'every_hours', n, hour: 0, minute: 0, days: [1,2,3,4,5], dom: 1 };
+  }
+
+  const m = parseInt(minF), h = parseInt(hourF), dom = parseInt(domF);
+
+  // monthly: M H DOM * *
+  if (isNum(minF) && isNum(hourF) && isNum(domF) && monthF === '*' && dowF === '*') {
+    if (dom >= 1 && dom <= 28) return { type: 'monthly', n: 15, hour: h, minute: m, days: [1,2,3,4,5], dom };
+  }
+
+  // weekly: M H * * DOW
+  if (isNum(minF) && isNum(hourF) && domF === '*' && monthF === '*' && dowF !== '*') {
+    const days = [];
+    for (const part of dowF.split(',')) {
+      if (part.includes('-')) {
+        const [lo, hi] = part.split('-').map(Number);
+        for (let d = lo; d <= hi; d++) days.push(d);
+      } else { const d = parseInt(part); if (!isNaN(d)) days.push(d); }
+    }
+    if (days.length > 0) return { type: 'weekly', n: 15, hour: h, minute: m, days, dom: 1 };
+  }
+
+  // daily: M H * * *
+  if (isNum(minF) && isNum(hourF) && domF === '*' && monthF === '*' && dowF === '*') {
+    return { type: 'daily', n: 15, hour: h, minute: m, days: [1,2,3,4,5], dom: 1 };
+  }
+
+  return null; // complex/unsupported — fall back to Advanced Cron
+}
+
+function fmtNextRun(d) {
+  if (!d) return null;
+  const now = new Date();
+  const today    = new Date(now.getFullYear(),  now.getMonth(),  now.getDate());
+  const tomorrow = new Date(today.getTime() + 86400000);
+  const dDay     = new Date(d.getFullYear(),    d.getMonth(),    d.getDate());
+  const timeStr  = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (dDay.getTime() === today.getTime())    return `Today at ${timeStr}`;
+  if (dDay.getTime() === tomorrow.getTime()) return `Tomorrow at ${timeStr}`;
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ` at ${timeStr}`;
+}
+
 // Optional per-run time budget. 0 = unlimited. When the deadline is reached the run
 // stops claiming chunks, lets in-flight inserts finish, and leaves the cursor unchanged
 // so the next trigger safely re-covers the window (dedup skips what already landed).
@@ -127,6 +398,21 @@ export default function PipelineEditor() {
   // Schedule mode: 'preset' uses a quick-pick, 'custom' reveals cron+hours fields
   const [scheduleMode, setScheduleMode] = useState('preset');
 
+  // Visual Schedule Builder state
+  const [cronBuilder, setCronBuilder] = useState({
+    type: 'every_minutes', n: 15,
+    hour: 0, minute: 0,
+    days: [1,2,3,4,5], dom: 1,
+  });
+  const [lookbackValue, setLookbackValue] = useState(15);
+  const [lookbackUnit, setLookbackUnit] = useState('minutes');
+  const [lookbackOverridden, setLookbackOverridden] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [cronSource, setCronSource] = useState('builder'); // 'builder' | 'advanced'
+  const [advancedCronInput, setAdvancedCronInput] = useState('');
+  const [advancedCronValid, setAdvancedCronValid] = useState(true);
+  const [advancedCollapseConfirm, setAdvancedCollapseConfirm] = useState(false);
+
   // Run Now (scheduled pipelines)
   const [runningNow, setRunningNow] = useState(false);
   const [runNowResult, setRunNowResult] = useState(null);
@@ -152,9 +438,33 @@ export default function PipelineEditor() {
     if (id) {
       api.getPipeline(id).then(async p => {
         setForm({ ...DEFAULT, ...p });
-        // Restore schedule mode: if saved values match no preset, show custom fields
+        // Restore schedule mode: if saved values match no preset, show custom builder
         const matchesPreset = SCHEDULE_PRESETS.some(pr => pr.cron === (p.schedule_cron || DEFAULT.schedule_cron) && pr.lookback === (p.schedule_lookback_hours || DEFAULT.schedule_lookback_hours));
-        setScheduleMode(matchesPreset ? 'preset' : 'custom');
+        if (!matchesPreset && p.pull_mode === 'scheduled') {
+          setScheduleMode('custom');
+          const savedCron = p.schedule_cron || DEFAULT.schedule_cron;
+          const savedLookback = p.schedule_lookback_hours ?? DEFAULT.schedule_lookback_hours;
+
+          // Restore lookback UI state
+          const lb = hoursToLookback(savedLookback);
+          setLookbackValue(lb.value);
+          setLookbackUnit(lb.unit);
+          setLookbackOverridden(false);
+
+          // Try to restore visual builder state from the saved cron
+          const parsed = parseCronToBuilder(savedCron);
+          if (parsed) {
+            setCronBuilder(parsed);
+            setCronSource('builder');
+            setAdvancedOpen(false);
+          } else {
+            // Complex expression — show it in Advanced Cron mode
+            setCronSource('advanced');
+            setAdvancedOpen(true);
+            setAdvancedCronInput(savedCron);
+            setAdvancedCronValid(true);
+          }
+        }
 
         // Pre-load connection indices so the index hints populate
         if (p.opensearch_connection_id) {
@@ -240,21 +550,57 @@ export default function PipelineEditor() {
     setTsLoading(true);
     setTsInfo(null);
     try {
-      // Mode-aware window: date_range → [from,to]; from_date → [from,now];
-      // continuous/scheduled → whole index (no bound).
       const opts = {};
+      let windowLabel = 'Entire index';
+
       if (form.pull_mode === 'date_range') {
         if (form.pull_from_date) opts.from = form.pull_from_date;
         if (form.pull_to_date) opts.to = form.pull_to_date;
+        const f = form.pull_from_date ? new Date(form.pull_from_date).toLocaleDateString() : '?';
+        const t = form.pull_to_date   ? new Date(form.pull_to_date).toLocaleDateString()   : '?';
+        windowLabel = `${f} → ${t}`;
+
       } else if (form.pull_mode === 'from_date') {
         if (form.pull_from_date) opts.from = form.pull_from_date;
+        opts.to = new Date().toISOString();
+        const f = form.pull_from_date ? new Date(form.pull_from_date).toLocaleDateString() : '?';
+        windowLabel = `${f} → now`;
+
+      } else if (form.pull_mode === 'scheduled' && scheduleMode === 'custom') {
+        // Preview window = now − lookback → now (what the next run will approximately pull)
+        const lookbackMs = (form.schedule_lookback_hours || 1) * 3600 * 1000;
+        const toDate   = new Date();
+        const fromDate = new Date(toDate.getTime() - lookbackMs);
+        opts.from = fromDate.toISOString();
+        opts.to   = toDate.toISOString();
+        windowLabel = `Last ${lookbackValue} ${lookbackUnit} (next run preview)`;
+
+      } else if (form.pull_mode === 'scheduled' && scheduleMode === 'preset') {
+        // Preset schedules have a fixed lookback
+        const preset = SCHEDULE_PRESETS.find(p => p.cron === form.schedule_cron);
+        const lookbackMs = (preset?.lookback || form.schedule_lookback_hours || 24) * 3600 * 1000;
+        const toDate   = new Date();
+        const fromDate = new Date(toDate.getTime() - lookbackMs);
+        opts.from = fromDate.toISOString();
+        opts.to   = toDate.toISOString();
+        windowLabel = `Last ${preset?.lookback || form.schedule_lookback_hours}h (next run preview)`;
+
+      } else if (form.pull_mode === 'continuous') {
+        // Continuous has no window — show the last 24 hours as a live activity indicator
+        const toDate   = new Date();
+        const fromDate = new Date(toDate.getTime() - 24 * 3600 * 1000);
+        opts.from = fromDate.toISOString();
+        opts.to   = toDate.toISOString();
+        windowLabel = 'Last 24 hours (recent activity)';
       }
+
       if (Array.isArray(form.index_set_filter) && form.index_set_filter.length) {
         opts.indexes = form.index_set_filter;
       }
       if (form.timestamp_field) opts.timestamp_field = form.timestamp_field;
+
       const info = await api.getTimestamps(form.opensearch_connection_id, form.index_pattern, opts);
-      setTsInfo(info);
+      setTsInfo({ ...info, windowLabel });
     } catch (e) {
       setTsInfo({ error: e.message });
     } finally {
@@ -372,6 +718,20 @@ export default function PipelineEditor() {
 
   async function save() {
     setError('');
+    // Validate schedule before saving
+    if (form.pull_mode === 'scheduled' && scheduleMode === 'custom') {
+      if (cronSource === 'builder') {
+        const builderErr = validateBuilder(cronBuilder);
+        if (builderErr) { setError(builderErr); return; }
+      } else {
+        const nextRun = nextCronRunGeneric(form.schedule_cron, 35);
+        if (!nextRun) { setError('Invalid cron expression. Check the Advanced Cron field.'); return; }
+      }
+      if (!(form.schedule_lookback_hours > 0)) {
+        setError('Lookback must be greater than 0.');
+        return;
+      }
+    }
     setSaving(true);
     try {
       if (id) await api.updatePipeline(id, form);
@@ -477,11 +837,18 @@ export default function PipelineEditor() {
                 {tsInfo.error ? (
                   <div className="text-red-400 text-xs">{tsInfo.error}</div>
                 ) : (
-                  <div className="grid grid-cols-3 gap-4 text-xs">
-                    <div><div className="text-slate-400 mb-1">Oldest Log</div><div className="text-white font-mono">{tsInfo.oldest_ts || '—'}</div></div>
-                    <div><div className="text-slate-400 mb-1">Newest Log</div><div className="text-white font-mono">{tsInfo.newest_ts || '—'}</div></div>
-                    <div><div className="text-slate-400 mb-1">Total Docs</div><div className="text-white">{(tsInfo.doc_count || 0).toLocaleString()}</div></div>
-                  </div>
+                  <>
+                    {tsInfo.windowLabel && (
+                      <div className="text-xs text-brand-400 font-medium mb-2">
+                        Window: {tsInfo.windowLabel}
+                      </div>
+                    )}
+                    <div className="grid grid-cols-3 gap-4 text-xs">
+                      <div><div className="text-slate-400 mb-1">Oldest Log</div><div className="text-white font-mono">{tsInfo.oldest_ts || '—'}</div></div>
+                      <div><div className="text-slate-400 mb-1">Newest Log</div><div className="text-white font-mono">{tsInfo.newest_ts || '—'}</div></div>
+                      <div><div className="text-slate-400 mb-1">Docs in window</div><div className="text-white">{(tsInfo.doc_count || 0).toLocaleString()}</div></div>
+                    </div>
+                  </>
                 )}
               </div>
             )}
@@ -636,55 +1003,298 @@ export default function PipelineEditor() {
                       );
                     })}
 
-                    {/* Custom */}
+                    {/* Custom — Visual Schedule Builder */}
                     <div className={`p-3 rounded-lg border transition-colors ${scheduleMode === 'custom' ? 'border-brand-500 bg-brand-900/20' : 'border-slate-700 hover:border-slate-600'}`}>
                       <label className="flex items-center gap-3 cursor-pointer">
                         <input type="radio" name="schedule_preset" checked={scheduleMode === 'custom'}
-                          onChange={() => setScheduleMode('custom')}
+                          onChange={() => {
+                            setScheduleMode('custom');
+                            if (cronSource === 'builder') {
+                              set('schedule_cron', buildCron(cronBuilder));
+                              set('schedule_lookback_hours', lookbackToHours(lookbackValue, lookbackUnit));
+                            }
+                          }}
                           className="flex-shrink-0" />
                         <div>
-                          <div className="text-sm font-medium text-white">Custom cron</div>
-                          <div className="text-xs text-slate-400">Set your own cron expression and lookback window</div>
+                          <div className="text-sm font-medium text-white">Custom schedule</div>
+                          <div className="text-xs text-slate-400">Visual builder or custom cron expression</div>
                         </div>
                       </label>
-                      {scheduleMode === 'custom' && (
-                        <div className="grid grid-cols-2 gap-3 mt-3 pl-6">
-                          <div>
-                            <label className="label text-xs">Cron Expression</label>
-                            <input className="input w-full font-mono text-sm"
-                              value={form.schedule_cron}
-                              onChange={e => set('schedule_cron', e.target.value)}
-                              placeholder="0 0 * * *" />
-                            <p className="text-xs text-slate-500 mt-1">Format: min&nbsp;hour&nbsp;dom&nbsp;month&nbsp;dow</p>
+
+                      {scheduleMode === 'custom' && (() => {
+                        // Derived values
+                        const generatedCron = buildCron(cronBuilder);
+                        const description = describeCron(cronBuilder);
+                        const nextRunDate = cronSource === 'builder'
+                          ? nextRunFromBuilder(cronBuilder)
+                          : nextCronRunGeneric(form.schedule_cron, 35);
+                        const nextRunStr = fmtNextRun(nextRunDate);
+
+                        // Overlap warning
+                        const lookbackMinutes = lookbackToHours(lookbackValue, lookbackUnit) * 60;
+                        let intervalMinutes = null;
+                        if (cronBuilder.type === 'every_minutes') intervalMinutes = cronBuilder.n;
+                        else if (cronBuilder.type === 'every_hours') intervalMinutes = cronBuilder.n * 60;
+                        else if (cronBuilder.type === 'daily') intervalMinutes = 1440;
+                        const showOverlapWarn = cronSource === 'builder'
+                          && intervalMinutes !== null
+                          && lookbackMinutes > intervalMinutes;
+
+                        function applyBuilderChange(newB) {
+                          setCronBuilder(newB);
+                          if (cronSource === 'builder') {
+                            set('schedule_cron', buildCron(newB));
+                            if (!lookbackOverridden) {
+                              const s = suggestLookback(newB);
+                              setLookbackValue(s.value);
+                              setLookbackUnit(s.unit);
+                              set('schedule_lookback_hours', lookbackToHours(s.value, s.unit));
+                            }
+                          }
+                        }
+
+                        function handleTypeChange(newType) {
+                          const defaults = { every_minutes: { n: 15 }, every_hours: { n: 4 }, daily: { hour: 0, minute: 0 }, weekly: { hour: 8, minute: 0, days: [1,2,3,4,5] }, monthly: { hour: 0, minute: 0, dom: 1 } };
+                          const newB = { ...cronBuilder, type: newType, ...defaults[newType] };
+                          applyBuilderChange(newB);
+                          setLookbackOverridden(false);
+                        }
+
+                        function handleLookbackChange(val, unit) {
+                          setLookbackValue(val);
+                          setLookbackUnit(unit || lookbackUnit);
+                          setLookbackOverridden(true);
+                          set('schedule_lookback_hours', lookbackToHours(val, unit || lookbackUnit));
+                        }
+
+                        function resetLookback() {
+                          const s = suggestLookback(cronBuilder);
+                          setLookbackValue(s.value);
+                          setLookbackUnit(s.unit);
+                          setLookbackOverridden(false);
+                          set('schedule_lookback_hours', lookbackToHours(s.value, s.unit));
+                        }
+
+                        function handleAdvancedInput(val) {
+                          setAdvancedCronInput(val);
+                          const valid = nextCronRunGeneric(val, 35) !== null;
+                          setAdvancedCronValid(valid);
+                          if (valid) set('schedule_cron', val);
+                        }
+
+                        function openAdvanced() {
+                          setAdvancedCronInput(form.schedule_cron);
+                          setAdvancedOpen(true);
+                          setCronSource('advanced');
+                        }
+
+                        function closeAdvanced() {
+                          const typed = advancedCronInput.trim();
+                          if (typed && typed !== generatedCron) {
+                            setAdvancedCollapseConfirm(true);
+                          } else {
+                            setAdvancedOpen(false);
+                            setCronSource('builder');
+                            set('schedule_cron', generatedCron);
+                          }
+                        }
+
+                        const DAY_LABELS = [
+                          { v: 0, l: 'Su' }, { v: 1, l: 'Mo' }, { v: 2, l: 'Tu' },
+                          { v: 3, l: 'We' }, { v: 4, l: 'Th' }, { v: 5, l: 'Fr' }, { v: 6, l: 'Sa' },
+                        ];
+
+                        return (
+                          <div className="mt-3 pl-6 space-y-4">
+                            {/* Frequency type selector */}
+                            <div>
+                              <label className="label text-xs mb-1">Frequency</label>
+                              <select className="input w-full text-sm" value={cronBuilder.type} onChange={e => handleTypeChange(e.target.value)}>
+                                <option value="every_minutes">Every N minutes</option>
+                                <option value="every_hours">Every N hours</option>
+                                <option value="daily">Daily at a specific time</option>
+                                <option value="weekly">Weekly on specific days</option>
+                                <option value="monthly">Monthly on a specific day</option>
+                              </select>
+                            </div>
+
+                            {/* Type-specific fields */}
+                            {cronBuilder.type === 'every_minutes' && (
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm text-slate-400">Every</span>
+                                <input type="number" className="input w-20 text-sm text-center" min={1} max={59}
+                                  value={cronBuilder.n}
+                                  onChange={e => applyBuilderChange({ ...cronBuilder, n: Math.min(59, Math.max(1, +e.target.value || 1)) })} />
+                                <span className="text-sm text-slate-400">minutes</span>
+                              </div>
+                            )}
+                            {cronBuilder.type === 'every_hours' && (
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm text-slate-400">Every</span>
+                                <input type="number" className="input w-20 text-sm text-center" min={1} max={23}
+                                  value={cronBuilder.n}
+                                  onChange={e => applyBuilderChange({ ...cronBuilder, n: Math.min(23, Math.max(1, +e.target.value || 1)) })} />
+                                <span className="text-sm text-slate-400">hours</span>
+                              </div>
+                            )}
+                            {(cronBuilder.type === 'daily' || cronBuilder.type === 'weekly' || cronBuilder.type === 'monthly') && (
+                              <div className="flex items-center gap-2 flex-wrap">
+                                {cronBuilder.type === 'weekly' && (
+                                  <div className="flex gap-1 mr-2">
+                                    {DAY_LABELS.map(({ v, l }) => {
+                                      const on = (cronBuilder.days || []).includes(v);
+                                      return (
+                                        <button key={v} type="button"
+                                          onClick={() => {
+                                            const days = on
+                                              ? (cronBuilder.days || []).filter(d => d !== v)
+                                              : [...(cronBuilder.days || []), v];
+                                            applyBuilderChange({ ...cronBuilder, days });
+                                          }}
+                                          className={`w-8 h-8 rounded text-xs font-medium transition-colors ${on ? 'bg-brand-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'}`}>
+                                          {l}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                                {cronBuilder.type === 'monthly' && (
+                                  <div className="flex items-center gap-2 mr-2">
+                                    <span className="text-sm text-slate-400">On day</span>
+                                    <input type="number" className="input w-20 text-sm text-center" min={1} max={28}
+                                      value={cronBuilder.dom}
+                                      onChange={e => applyBuilderChange({ ...cronBuilder, dom: Math.min(28, Math.max(1, +e.target.value || 1)) })} />
+                                  </div>
+                                )}
+                                <span className="text-sm text-slate-400">at</span>
+                                <input type="number" className="input w-16 text-sm text-center" min={0} max={23}
+                                  value={cronBuilder.hour}
+                                  onChange={e => applyBuilderChange({ ...cronBuilder, hour: Math.min(23, Math.max(0, +e.target.value)) })} />
+                                <span className="text-sm text-slate-400">:</span>
+                                <input type="number" className="input w-16 text-sm text-center" min={0} max={59}
+                                  value={cronBuilder.minute}
+                                  onChange={e => applyBuilderChange({ ...cronBuilder, minute: Math.min(59, Math.max(0, +e.target.value)) })} />
+                                <span className="text-xs text-slate-500">(server local time)</span>
+                              </div>
+                            )}
+
+                            {/* Lookback window */}
+                            <div>
+                              <label className="label text-xs mb-1">Lookback window</label>
+                              <div className="flex items-center gap-2">
+                                <input type="number" className="input w-20 text-sm text-center" min={1}
+                                  value={lookbackValue}
+                                  onChange={e => handleLookbackChange(Math.max(1, +e.target.value || 1), lookbackUnit)} />
+                                <select className="input text-sm" value={lookbackUnit}
+                                  onChange={e => handleLookbackChange(lookbackValue, e.target.value)}>
+                                  <option value="minutes">Minutes</option>
+                                  <option value="hours">Hours</option>
+                                  <option value="days">Days</option>
+                                </select>
+                                {lookbackOverridden && (
+                                  <button type="button" onClick={resetLookback}
+                                    className="text-xs text-brand-400 hover:text-brand-300 underline whitespace-nowrap">
+                                    Reset to recommended
+                                  </button>
+                                )}
+                              </div>
+                              {showOverlapWarn && (
+                                <p className="text-xs text-amber-400 mt-1.5">
+                                  ⚠️ Lookback is larger than the schedule interval. Overlapping time windows will be processed on each run.
+                                </p>
+                              )}
+                            </div>
+
+                            {/* Schedule preview */}
+                            {cronSource === 'builder' && (
+                              <div className="bg-slate-800/60 border border-slate-700 rounded-lg px-3 py-2.5 text-xs space-y-1">
+                                <div className="text-white font-medium">{description}</div>
+                                {nextRunStr && <div className="text-slate-400">Next run: <span className="text-brand-300">{nextRunStr}</span></div>}
+                                <div className="text-slate-500 font-mono pt-0.5">Generated cron: <span className="text-slate-300">{generatedCron}</span></div>
+                              </div>
+                            )}
+
+                            {/* Advanced Cron section */}
+                            <div className="border border-slate-700 rounded-lg overflow-hidden">
+                              <button type="button"
+                                onClick={advancedOpen ? closeAdvanced : openAdvanced}
+                                className="w-full flex items-center justify-between px-3 py-2 text-xs text-slate-400 hover:text-white hover:bg-slate-800/40 transition-colors">
+                                <span className="font-medium">Advanced Cron {cronSource === 'advanced' ? <span className="text-brand-400 ml-1">(active)</span> : ''}</span>
+                                <span>{advancedOpen ? '▲' : '▼'}</span>
+                              </button>
+
+                              {advancedOpen && (
+                                <div className="px-3 pb-3 pt-1 space-y-2 border-t border-slate-700">
+                                  <p className="text-xs text-slate-500">Custom cron overrides the visual builder above. Format: <code className="text-slate-400">min hour dom month dow</code></p>
+                                  <div className="flex items-center gap-2">
+                                    <input className="input flex-1 font-mono text-sm"
+                                      value={advancedCronInput}
+                                      onChange={e => handleAdvancedInput(e.target.value)}
+                                      placeholder="0 */3 * * *" />
+                                    <span className={`text-xs font-medium ${advancedCronValid ? 'text-green-400' : 'text-red-400'}`}>
+                                      {advancedCronInput ? (advancedCronValid ? '✓ Valid' : '✕ Invalid') : ''}
+                                    </span>
+                                  </div>
+                                  {cronSource === 'advanced' && advancedCronValid && advancedCronInput && (() => {
+                                    const nr = nextCronRunGeneric(advancedCronInput, 35);
+                                    const s = fmtNextRun(nr);
+                                    return s ? <div className="text-xs text-slate-400">Next run: <span className="text-brand-300">{s}</span></div> : null;
+                                  })()}
+                                </div>
+                              )}
+
+                              {/* Collapse confirmation dialog */}
+                              {advancedCollapseConfirm && (
+                                <div className="px-3 pb-3 pt-2 border-t border-slate-700 bg-slate-800/60 space-y-2">
+                                  <p className="text-xs text-amber-300 font-medium">Switch back to Visual Builder?</p>
+                                  <p className="text-xs text-slate-400">
+                                    Your custom expression <code className="text-slate-300 font-mono">{advancedCronInput}</code> will be replaced by the visual builder's expression <code className="text-slate-300 font-mono">{generatedCron}</code>.
+                                  </p>
+                                  <div className="flex gap-2">
+                                    <button type="button"
+                                      onClick={() => {
+                                        setAdvancedCollapseConfirm(false);
+                                        setAdvancedOpen(false);
+                                        setCronSource('advanced');
+                                      }}
+                                      className="px-2.5 py-1 rounded text-xs bg-slate-700 text-slate-300 hover:bg-slate-600">
+                                      Keep custom expression
+                                    </button>
+                                    <button type="button"
+                                      onClick={() => {
+                                        setAdvancedCollapseConfirm(false);
+                                        setAdvancedOpen(false);
+                                        setCronSource('builder');
+                                        set('schedule_cron', generatedCron);
+                                      }}
+                                      className="px-2.5 py-1 rounded text-xs bg-brand-700 text-white hover:bg-brand-600">
+                                      Switch to Visual Builder
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
                           </div>
-                          <div>
-                            <label className="label text-xs">Lookback (hours)</label>
-                            <input type="number" className="input w-full"
-                              value={form.schedule_lookback_hours}
-                              onChange={e => set('schedule_lookback_hours', Math.max(1, +e.target.value))}
-                              min={1} max={8760} />
-                            <p className="text-xs text-slate-500 mt-1">Hours to pull before each trigger</p>
-                          </div>
-                        </div>
-                      )}
+                        );
+                      })()}
                     </div>
                   </div>
 
                   {/* ── Live preview ── */}
-                  <div className="bg-slate-800/60 border border-slate-700 rounded-lg px-4 py-3 text-xs space-y-1">
-                    <div className="text-slate-400 font-medium mb-1">At each trigger:</div>
-                    <div className="text-white">
-                      Pulls logs from{' '}
-                      <span className="text-brand-400 font-mono">trigger − {form.schedule_lookback_hours}h</span>
-                      {' '}to{' '}
-                      <span className="text-brand-400 font-mono">trigger time</span>
+                  {scheduleMode === 'preset' && (
+                    <div className="bg-slate-800/60 border border-slate-700 rounded-lg px-4 py-3 text-xs space-y-1">
+                      <div className="text-slate-400 font-medium mb-1">At each trigger:</div>
+                      <div className="text-white">
+                        Pulls logs from{' '}
+                        <span className="text-brand-400 font-mono">trigger − {form.schedule_lookback_hours}h</span>
+                        {' '}to{' '}
+                        <span className="text-brand-400 font-mono">trigger time</span>
+                      </div>
+                      <div className="text-slate-400 pt-0.5">
+                        {scheduleExample(form.schedule_cron, form.schedule_lookback_hours)}
+                      </div>
                     </div>
-                    <div className="text-slate-400 pt-0.5">
-                      {scheduleMode === 'preset'
-                        ? scheduleExample(form.schedule_cron, form.schedule_lookback_hours)
-                        : `Custom: ${form.schedule_cron || '—'} · ${form.schedule_lookback_hours}h lookback`}
-                    </div>
-                  </div>
+                  )}
 
                   {/* ── Parallel workers ── */}
                   <div>

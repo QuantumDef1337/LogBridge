@@ -81,6 +81,8 @@ export const api = {
   getPartitions: (id) => req('GET', `/pipelines/${id}/partitions`),
   resetPartitionCursor: (id, indexName) => req('DELETE', `/pipelines/${id}/partitions/${encodeURIComponent(indexName)}/cursor`),
   reconcile: (id, from, to) => req('POST', `/pipelines/${id}/reconcile`, { from, to }),
+  getRuns: (id, limit = 20) => req('GET', `/pipelines/${id}/runs?limit=${limit}`),
+  getAllRuns: (params = {}) => req('GET', `/pipelines/runs/all?${new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([,v]) => v != null && v !== ''))).toString()}`),
   getRunProgress: (id) => req('GET', `/pipelines/${id}/progress`),
 
   // ClickHouse DDL
