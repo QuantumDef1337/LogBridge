@@ -452,6 +452,49 @@ router.post('/:id/reconcile', async (req, res) => {
   });
 });
 
+// ── Run History ──────────────────────────────────────────────────────────────
+
+// Global run history — MUST be before /:id/runs so Express doesn't match 'all' as :id
+router.get('/runs/all', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit || '50'), 200);
+  const pipelineId = req.query.pipeline_id ? parseInt(req.query.pipeline_id) : null;
+  const page = Math.max(1, parseInt(req.query.page || '1'));
+  const offset = (page - 1) * limit;
+
+  const where = pipelineId ? 'WHERE r.pipeline_id = ?' : '';
+  const args  = pipelineId ? [pipelineId] : [];
+
+  const total = getDb().prepare(`SELECT COUNT(*) c FROM pipeline_runs r ${where}`).get(...args).c;
+  const rows  = getDb().prepare(`
+    SELECT r.id, r.pipeline_id, p.name AS pipeline_name, r.started_at, r.finished_at,
+           r.from_ts, r.to_ts, r.status, r.fetched, r.inserted, r.skipped, r.dlq, r.error_msg,
+           rec.source_count, rec.destination_count, rec.remaining, rec.success_pct, rec.reconciled_at
+    FROM pipeline_runs r
+    JOIN pipelines p ON p.id = r.pipeline_id
+    LEFT JOIN pipeline_run_reconciliation rec ON rec.run_id = r.id
+    ${where}
+    ORDER BY r.id DESC
+    LIMIT ? OFFSET ?
+  `).all(...args, limit, offset);
+
+  res.json({ runs: rows, total, page, pages: Math.ceil(total / limit) });
+});
+
+router.get('/:id/runs', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit || '20'), 100);
+  const rows = getDb().prepare(`
+    SELECT r.id, r.pipeline_id, r.started_at, r.finished_at, r.from_ts, r.to_ts,
+           r.status, r.fetched, r.inserted, r.skipped, r.dlq, r.error_msg,
+           rec.source_count, rec.destination_count, rec.remaining, rec.success_pct, rec.reconciled_at
+    FROM pipeline_runs r
+    LEFT JOIN pipeline_run_reconciliation rec ON rec.run_id = r.id
+    WHERE r.pipeline_id = ?
+    ORDER BY r.id DESC
+    LIMIT ?
+  `).all(req.params.id, limit);
+  res.json({ runs: rows });
+});
+
 // ── Dead Letter Queue ────────────────────────────────────────────────────────
 
 router.get('/:id/dlq', (req, res) => {

@@ -338,6 +338,96 @@ function RunProgress({ pipelineId, isRunning }) {
   );
 }
 
+// ── Per-run compact history (pipeline detail panel) ──────────────────────────
+
+function fmtDurSecs(s) {
+  if (s == null) return null;
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+function RunHistory({ pipelineId, refreshKey }) {
+  const [runs, setRuns] = useState(null);
+  const [showAll, setShowAll] = useState(false);
+
+  useEffect(() => {
+    setRuns(null);
+    api.getRuns(pipelineId, 20)
+      .then(r => setRuns(r.runs || []))
+      .catch(() => setRuns([]));
+  }, [pipelineId, refreshKey]);
+
+  if (!runs) return (
+    <div className="text-xs text-slate-600 italic flex items-center gap-1.5">
+      <span className="w-3 h-3 border-2 border-slate-700 border-t-purple-500 rounded-full animate-spin" />
+      Loading…
+    </div>
+  );
+  if (!runs.length) return (
+    <div className="text-xs text-slate-600 italic">No runs recorded yet.</div>
+  );
+
+  const visible = showAll ? runs : runs.slice(0, 5);
+
+  return (
+    <div className="space-y-1">
+      <div className="overflow-hidden rounded-lg border border-slate-800/60">
+        <table className="w-full text-[11px]">
+          <thead>
+            <tr className="bg-slate-800/40 text-slate-500">
+              <th className="px-3 py-1.5 text-left font-medium">Time</th>
+              <th className="px-3 py-1.5 text-left font-medium">Window</th>
+              <th className="px-3 py-1.5 text-right font-medium">Inserted</th>
+              <th className="px-3 py-1.5 text-right font-medium">Coverage</th>
+              <th className="px-3 py-1.5 text-right font-medium">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((run, i) => {
+              const dur = run.started_at && run.finished_at
+                ? Math.round((new Date(run.finished_at) - new Date(run.started_at)) / 1000) : null;
+              const pct = run.success_pct;
+              const statusColor = run.status === 'complete' ? 'text-emerald-400'
+                : run.status === 'failed' ? 'text-red-400'
+                : run.status === 'cancelled' ? 'text-amber-400'
+                : 'text-slate-400';
+              const coverageColor = pct === 100 ? 'text-emerald-400'
+                : pct != null && pct >= 95 ? 'text-amber-400' : 'text-red-400';
+              const windowStr = run.from_ts && run.to_ts
+                ? `${fmtTs(run.from_ts).split(',')[1]?.trim() ?? fmtTs(run.from_ts)} → ${fmtTs(run.to_ts).split(',')[1]?.trim() ?? fmtTs(run.to_ts)}`
+                : '—';
+              return (
+                <tr key={run.id} className={`border-t border-slate-800/40 ${i === 0 ? 'bg-slate-800/20' : 'hover:bg-slate-800/10'} transition-colors`}>
+                  <td className="px-3 py-1.5 text-slate-500 whitespace-nowrap">
+                    {run.started_at ? fmtTs(run.started_at).split(',')[1]?.trim() ?? fmtTs(run.started_at) : '—'}
+                    {dur != null && <span className="text-slate-700 ml-1">({fmtDurSecs(dur)})</span>}
+                  </td>
+                  <td className="px-3 py-1.5 font-mono text-slate-600 text-[10px] whitespace-nowrap">{windowStr}</td>
+                  <td className="px-3 py-1.5 text-right text-white font-medium">{(run.inserted ?? 0).toLocaleString()}</td>
+                  <td className={`px-3 py-1.5 text-right font-medium ${coverageColor}`}>
+                    {pct != null ? `${pct}%` : run.source_count == null ? '—' : 'pending'}
+                  </td>
+                  <td className={`px-3 py-1.5 text-right font-medium ${statusColor}`}>
+                    {run.status === 'complete' ? '✓' : run.status === 'failed' ? '✗' : run.status?.toUpperCase()}
+                    {run.dlq > 0 && <span className="text-red-400 ml-1">DLQ:{run.dlq}</span>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {runs.length > 5 && (
+        <button onClick={() => setShowAll(s => !s)}
+          className="text-[10px] text-slate-600 hover:text-slate-400 transition-colors flex items-center gap-1 pl-1">
+          {showAll ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+          {showAll ? 'Show less' : `Show all ${runs.length} runs`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ── Checkpoint / detail panel ─────────────────────────────────────────────────
 
 function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRunReconcile, onResetPartitionCursor }) {
@@ -348,6 +438,8 @@ function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRun
   const [chStats, setChStats] = useState(null);
   const [chLoading, setChLoading] = useState(false);
   const fetchedRef = useRef(false);
+  const [runHistoryKey, setRunHistoryKey] = useState(0);
+  const [healthWindow, setHealthWindow] = useState('24'); // hours; '' = all-time
 
   useEffect(() => {
     if (fetchedRef.current) return;
@@ -495,25 +587,55 @@ function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRun
       {/* Live run progress (chunk-queue) */}
       <RunProgress pipelineId={p.id} isRunning={p.is_running} />
 
-      {/* Reconciliation */}
+      {/* Per-run reconciliation history */}
       <div>
         <div className="flex items-center justify-between mb-2">
           <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-            <GitCompare size={11} /> Reconciliation
-            <span className="text-[10px] font-normal text-slate-600 normal-case tracking-normal">auto every 30s</span>
+            <Activity size={11} /> Run History
           </div>
           <button
-            onClick={onRunReconcile}
-            disabled={reconcilingId === p.id}
-            title="Refresh now"
-            className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-purple-300 disabled:opacity-50 transition-colors"
+            onClick={() => setRunHistoryKey(k => k + 1)}
+            title="Refresh run history"
+            className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-purple-300 transition-colors"
           >
-            {reconcilingId === p.id ? (
-              <><span className="w-3 h-3 border-2 border-slate-600 border-t-purple-400 rounded-full animate-spin" /> Checking…</>
-            ) : (
-              <><RefreshCw size={11} /></>
-            )}
+            <RefreshCw size={11} />
           </button>
+        </div>
+        <RunHistory pipelineId={p.id} refreshKey={runHistoryKey} />
+      </div>
+
+      {/* Overall Health */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+            <GitCompare size={11} /> Overall Health
+            <span className="text-[10px] font-normal text-slate-600 normal-case tracking-normal">auto every 30s</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <select
+              value={healthWindow}
+              onChange={e => { setHealthWindow(e.target.value); onRunReconcile(e.target.value); }}
+              className="text-[10px] bg-slate-800 border border-slate-700 rounded px-1.5 py-0.5 text-slate-400 hover:text-white transition-colors"
+            >
+              <option value="1">Last 1 hour</option>
+              <option value="6">Last 6 hours</option>
+              <option value="24">Last 24 hours</option>
+              <option value="168">Last 7 days</option>
+              <option value="">All time</option>
+            </select>
+            <button
+              onClick={() => onRunReconcile(healthWindow)}
+              disabled={reconcilingId === p.id}
+              title="Refresh now"
+              className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-purple-300 disabled:opacity-50 transition-colors"
+            >
+              {reconcilingId === p.id ? (
+                <><span className="w-3 h-3 border-2 border-slate-600 border-t-purple-400 rounded-full animate-spin" /> Checking…</>
+              ) : (
+                <><RefreshCw size={11} /></>
+              )}
+            </button>
+          </div>
         </div>
         {(!recon || recon.pending) && (
           <div className="text-xs text-slate-600 italic flex items-center gap-1.5">
@@ -537,9 +659,9 @@ function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRun
             : Math.min(99.9, Math.floor((dst / src) * 1000) / 10);
           const w = recon.window;
           const rowErr = recon.error || row.error;
-          const verdict = recon.overall === 'MATCH' ? 'COMPLETE'
+          const verdict = recon.overall === 'MATCH' ? 'HEALTHY'
             : recon.overall === 'MISMATCH' ? 'PARTIAL'
-            : recon.overall === 'EXCESS' ? 'OVER-COUNT'
+            : recon.overall === 'EXCESS' ? 'EXCESS'
             : 'INCONCLUSIVE';
           const verdictColor = recon.overall === 'MATCH' ? 'text-emerald-400'
             : recon.overall === 'MISMATCH' ? 'text-amber-400'
@@ -559,7 +681,7 @@ function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRun
                 <span className="text-slate-400">Ingested (ClickHouse): <span className="text-white font-medium">{dst?.toLocaleString() ?? '?'}</span></span>
                 {isExcess ? (
                   <span className="text-orange-400">
-                    Excess: <span className="font-medium">+{excess.toLocaleString()}</span> <span className="text-slate-500">(dst &gt; src — likely duplicates or source retention)</span>
+                    Excess: <span className="font-medium">+{excess.toLocaleString()}</span> <span className="text-slate-500">(ClickHouse has more — OpenSearch may have rotated old data via ILM)</span>
                   </span>
                 ) : remaining != null && (
                   <span className={remaining > 0 ? 'text-amber-400' : 'text-emerald-400'}>
@@ -783,7 +905,7 @@ function PipelineCard({
           partitions={partitions[p.id]}
           reconcileResult={reconcileResult}
           reconcilingId={reconcilingId}
-          onRunReconcile={() => onRunReconcile(p)}
+          onRunReconcile={(windowHours) => onRunReconcile(p, windowHours)}
         />
       )}
     </div>
@@ -916,7 +1038,7 @@ export default function Pipelines() {
       }
       // Auto-run reconciliation when opening
       const pipeline = list.find(p => p.id === id);
-      if (pipeline) runReconcile(pipeline);
+      if (pipeline) runReconcile(pipeline, '24');
     }
   }
 
@@ -938,13 +1060,13 @@ export default function Pipelines() {
         .filter(id => expandedRef.current[id]).map(Number);
       for (const id of openIds) {
         const pipeline = listRef.current.find(p => p.id === id);
-        if (pipeline && reconRef.current == null) runReconcile(pipeline);
+        if (pipeline && reconRef.current == null) runReconcile(pipeline, '24');
       }
     }, 30000);
     return () => clearInterval(t);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  async function runReconcile(p) {
+  async function runReconcile(p, windowHours) {
     setExpanded(e => ({ ...e, [p.id]: true }));
     if (!partitions[p.id]) {
       try { setPartitions(s => ({ ...s, [p.id]: [] })); } catch {}
@@ -952,8 +1074,11 @@ export default function Pipelines() {
     setReconcilingId(p.id);
     setReconcileResult(s => ({ ...s, [p.id]: { pending: true } }));
     try {
-      // Backend derives the comparison window from the pipeline's pull mode.
-      const r = await api.reconcile(p.id);
+      // Pass explicit from/to when a health window is selected.
+      const hours = windowHours != null ? windowHours : '24';
+      const from = hours ? new Date(Date.now() - Number(hours) * 3600 * 1000).toISOString() : undefined;
+      const to   = hours ? new Date().toISOString() : undefined;
+      const r = await api.reconcile(p.id, from, to);
 
       // ── ETA via reconciliation delta ─────────────────────────────────────────
       // Rate = (ingested_now − ingested_earlier) / elapsed, using a short history so
