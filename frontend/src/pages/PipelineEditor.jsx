@@ -554,8 +554,16 @@ export default function PipelineEditor() {
       let windowLabel = 'Entire index';
 
       if (form.pull_mode === 'date_range') {
-        if (form.pull_from_date) opts.from = form.pull_from_date;
-        if (form.pull_to_date) opts.to = form.pull_to_date;
+        if (form.pull_from_date) {
+          const d = new Date(form.pull_from_date); d.setMilliseconds(0);
+          opts.from = d.toISOString();
+        }
+        if (form.pull_to_date) {
+          const d = new Date(form.pull_to_date);
+          const isMidnight = d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0;
+          d.setMilliseconds(isMidnight ? 0 : 999);
+          opts.to = d.toISOString();
+        }
         const f = form.pull_from_date ? new Date(form.pull_from_date).toLocaleDateString() : '?';
         const t = form.pull_to_date   ? new Date(form.pull_to_date).toLocaleDateString()   : '?';
         windowLabel = `${f} → ${t}`;
