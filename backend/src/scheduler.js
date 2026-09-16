@@ -233,6 +233,38 @@ async function runLoop(pipelineId, token) {
       if (pipeline.pull_mode === 'scheduled') {
         // Scheduled mode: runScheduledSlices computes the window itself (cursor → now).
         const cronExpr = (pipeline.schedule_cron || '0 0 * * *').trim();
+
+        // On activation (first run or reactivation after pause), only run immediately if the
+        // cron was due within the last 5 minutes (missed window). Otherwise sleep until the
+        // next scheduled fire time.
+        const statusRow = db.prepare('SELECT last_success_at FROM pipeline_status WHERE pipeline_id=?').get(pipelineId);
+        const lastSuccess = statusRow && statusRow.last_success_at ? new Date(statusRow.last_success_at + 'Z') : null;
+        let prevFire = null;
+        try {
+          // Walk back to find the most recent cron fire before now
+          const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000);
+          const candidate = nextCronRun(cronExpr, fiveMinAgo);
+          if (candidate && candidate.getTime() <= Date.now()) prevFire = candidate;
+        } catch (e) { /* ignore */ }
+
+        const missedCron = prevFire && (!lastSuccess || prevFire.getTime() > lastSuccess.getTime());
+        if (!missedCron) {
+          // Not a missed cron — wait for the next scheduled fire time
+          let nextFire;
+          try { nextFire = nextCronRun(cronExpr, new Date()); } catch (e) { nextFire = null; }
+          if (nextFire) {
+            const sleepMs = Math.max(0, nextFire.getTime() - Date.now());
+            db.prepare("UPDATE pipeline_status SET status='idle', last_error=NULL WHERE pipeline_id=?").run(pipelineId);
+            db.prepare("INSERT INTO pipeline_logs (pipeline_id, level, message) VALUES (?, 'info', ?)")
+              .run(pipelineId, `Scheduled pipeline activated — first run at: ${nextFire.toISOString()} (in ${Math.round(sleepMs / 60000)}m)`);
+            nextRunAt.set(pipelineId, nextFire.getTime());
+            const ok = await cancellableSleep(sleepMs, token);
+            nextRunAt.delete(pipelineId);
+            if (!ok) break;
+            consecutiveErrors = 0;
+          }
+        }
+
         result = await runner.runScheduledSlices(conn, cluster, pipeline, { cancelToken: token });
 
         // After a successful run, sleep until the next cron fire time.
