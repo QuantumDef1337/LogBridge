@@ -346,16 +346,27 @@ function fmtDurSecs(s) {
   return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
-function RunHistory({ pipelineId, refreshKey }) {
+function RunHistory({ pipelineId, refreshKey, isRunning }) {
   const [runs, setRuns] = useState(null);
   const [showAll, setShowAll] = useState(false);
 
-  useEffect(() => {
-    setRuns(null);
+  const fetchRuns = useCallback(() => {
     api.getRuns(pipelineId, 20)
       .then(r => setRuns(r.runs || []))
       .catch(() => setRuns([]));
-  }, [pipelineId, refreshKey]);
+  }, [pipelineId]);
+
+  useEffect(() => {
+    setRuns(null);
+    fetchRuns();
+  }, [pipelineId, refreshKey, fetchRuns]);
+
+  // Live poll every 10s while pipeline is running
+  useEffect(() => {
+    if (!isRunning) return;
+    const t = setInterval(fetchRuns, 10000);
+    return () => clearInterval(t);
+  }, [isRunning, fetchRuns]);
 
   if (!runs) return (
     <div className="text-xs text-slate-600 italic flex items-center gap-1.5">
@@ -601,7 +612,7 @@ function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRun
             <RefreshCw size={11} />
           </button>
         </div>
-        <RunHistory pipelineId={p.id} refreshKey={runHistoryKey} />
+        <RunHistory pipelineId={p.id} refreshKey={runHistoryKey} isRunning={p.is_running} />
       </div>
 
       {/* Overall Health */}
@@ -1053,17 +1064,29 @@ export default function Pipelines() {
   useEffect(() => { listRef.current = list; }, [list]);
   useEffect(() => { reconRef.current = reconcilingId; }, [reconcilingId]);
 
-  // Single stable 30s interval — created once, never reset by re-renders.
+  // Reconciliation interval — 10s while any expanded pipeline is running, 30s otherwise.
   useEffect(() => {
-    const t = setInterval(() => {
+    const tick = () => {
       const openIds = Object.keys(expandedRef.current)
         .filter(id => expandedRef.current[id]).map(Number);
       for (const id of openIds) {
         const pipeline = listRef.current.find(p => p.id === id);
         if (pipeline && reconRef.current == null) runReconcile(pipeline, '24');
       }
-    }, 30000);
-    return () => clearInterval(t);
+    };
+    const getInterval = () => {
+      const openIds = Object.keys(expandedRef.current)
+        .filter(id => expandedRef.current[id]).map(Number);
+      const anyRunning = openIds.some(id => listRef.current.find(p => p.id === id)?.is_running);
+      return anyRunning ? 10000 : 30000;
+    };
+    let t = setInterval(tick, getInterval());
+    // Re-evaluate interval every 10s to switch between fast/slow polling
+    const watcher = setInterval(() => {
+      clearInterval(t);
+      t = setInterval(tick, getInterval());
+    }, 10000);
+    return () => { clearInterval(t); clearInterval(watcher); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function runReconcile(p, windowHours) {
