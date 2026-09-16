@@ -268,8 +268,8 @@ router.post('/:id/run-now', async (req, res) => {
       out = await runner.runScheduledSlices(ctx.conn, ctx.cluster, ctx.pipeline, opts);
     } else if (ctx.pipeline.pull_mode === 'date_range' && (ctx.pipeline.parallel_slices || 1) > 1) {
       // date_range + parallel workers: same time-window partitioning over the explicit range.
-      const from = new Date(ctx.pipeline.pull_from_date);
-      const to   = ctx.pipeline.pull_to_date ? new Date(ctx.pipeline.pull_to_date) : new Date();
+      const from = runner.normaliseFrom(new Date(ctx.pipeline.pull_from_date));
+      const to   = ctx.pipeline.pull_to_date ? runner.normaliseTo(new Date(ctx.pipeline.pull_to_date)) : new Date();
       out = await runner.runScheduledSlices(ctx.conn, ctx.cluster, ctx.pipeline, { forceFrom: from, to });
     } else if (physicalIndexes && physicalIndexes.length > 0) {
       // Multi-index mode: run each physical index using per-index cursors (same as scheduler)

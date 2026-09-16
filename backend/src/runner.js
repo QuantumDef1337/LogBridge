@@ -320,33 +320,31 @@ function transformDoc(doc, pipeline) {
   return row;
 }
 
-// When the UI supplied only minute precision (seconds === 0 && ms === 0), OpenSearch rounds
-// a bare `lte "…T23:59"` UP to 23:59:59.999 while new Date() gives 23:59:00.000 — so we
-// advance to the next minute and use `lt` to include the full final minute.
-// When the user supplied explicit seconds/milliseconds we use `lte` with the exact value.
-function dateRangeEndExclusive(d) {
-  return new Date(Math.floor(d.getTime() / 60000) * 60000 + 60000);
+// Normalise a pipeline "from" date to an exact start instant (ms = 000).
+function normaliseFrom(d) {
+  const r = new Date(d);
+  r.setMilliseconds(0);
+  return r;
+}
+
+// Normalise a pipeline "to" date:
+//   - Midnight (00:00:00.000) → kept exact (.000) — user means end-of-previous-day boundary.
+//   - Any other time          → ms set to 999     — captures the full specified second.
+function normaliseTo(d) {
+  const r = new Date(d);
+  const isMidnight = r.getHours() === 0 && r.getMinutes() === 0 && r.getSeconds() === 0;
+  r.setMilliseconds(isMidnight ? 0 : 999);
+  return r;
 }
 
 // Build the OpenSearch time-range filter from the pipeline's pull mode.
 function buildRange(pipeline) {
   const range = {};
   if (pipeline.pull_mode === 'from_date' && pipeline.pull_from_date) {
-    range.gte = pipeline.pull_from_date;
+    range.gte = normaliseFrom(new Date(pipeline.pull_from_date)).toISOString();
   } else if (pipeline.pull_mode === 'date_range') {
-    if (pipeline.pull_from_date) range.gte = pipeline.pull_from_date;
-    if (pipeline.pull_to_date) {
-      const toDate = new Date(pipeline.pull_to_date);
-      // If the user specified sub-minute precision, honour it exactly with lte.
-      // Otherwise round up to next minute boundary so the full final minute is captured.
-      if (toDate.getSeconds() !== 0 || toDate.getMilliseconds() !== 0) {
-        // Round up to end of the specified second (set ms to 999) so the full second is captured.
-        toDate.setMilliseconds(999);
-        range.lte = toDate.toISOString();
-      } else {
-        range.lt = dateRangeEndExclusive(toDate).toISOString();
-      }
-    }
+    if (pipeline.pull_from_date) range.gte = normaliseFrom(new Date(pipeline.pull_from_date)).toISOString();
+    if (pipeline.pull_to_date)   range.lte = normaliseTo(new Date(pipeline.pull_to_date)).toISOString();
   }
   return range;
 }
@@ -1102,4 +1100,4 @@ async function runScheduledSlices(conn, cluster, pipeline, opts = {}) {
     durationSec: Math.round(durationSec), avgRowsPerSec: avgRate };
 }
 
-module.exports = { runPipelineOnce, runIndexPartition, runScheduledSlices, transformDoc, buildRange, dateRangeEndExclusive };
+module.exports = { runPipelineOnce, runIndexPartition, runScheduledSlices, transformDoc, buildRange, normaliseFrom, normaliseTo };
