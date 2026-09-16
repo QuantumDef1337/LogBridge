@@ -980,7 +980,7 @@ export default function PipelineEditor() {
 
                   {/* First-run note */}
                   <div className="text-xs text-amber-400/80 bg-amber-900/10 border border-amber-800/40 rounded-lg px-3 py-2">
-                    First run starts <strong>immediately</strong> when you activate the pipeline, then follows the schedule.
+                    First run waits for the <strong>next scheduled time</strong>, then repeats on the cron schedule.
                   </div>
 
                   {/* ── Preset picker ── */}
