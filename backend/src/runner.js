@@ -321,13 +321,10 @@ function transformDoc(doc, pipeline) {
   return row;
 }
 
-// Date-range windows are picked at minute granularity in the UI. OpenSearch rounds a
-// minute-precision `lte` bound (e.g. "…T23:59") UP to the end of that minute
-// (23:59:59.999), so reconciliation counts the whole final minute. The ingestion chunker,
-// however, parses the same value with new Date() to an exact instant (23:59:00.000) and
-// uses it as an EXCLUSIVE upper bound — silently dropping 23:59:00.001–23:59:59.999
-// (~one minute of events). Advance the window end to the START OF THE NEXT MINUTE so the
-// selected final minute is fully included and ingestion matches reconciliation.
+// When the UI supplied only minute precision (seconds === 0 && ms === 0), OpenSearch rounds
+// a bare `lte "…T23:59"` UP to 23:59:59.999 while new Date() gives 23:59:00.000 — so we
+// advance to the next minute and use `lt` to include the full final minute.
+// When the user supplied explicit seconds/milliseconds we use `lte` with the exact value.
 function dateRangeEndExclusive(d) {
   return new Date(Math.floor(d.getTime() / 60000) * 60000 + 60000);
 }
@@ -339,8 +336,18 @@ function buildRange(pipeline) {
     range.gte = pipeline.pull_from_date;
   } else if (pipeline.pull_mode === 'date_range') {
     if (pipeline.pull_from_date) range.gte = pipeline.pull_from_date;
-    // Exclusive next-minute upper bound so the selected final minute is not truncated.
-    if (pipeline.pull_to_date) range.lt = dateRangeEndExclusive(new Date(pipeline.pull_to_date)).toISOString();
+    if (pipeline.pull_to_date) {
+      const toDate = new Date(pipeline.pull_to_date);
+      // If the user specified sub-minute precision, honour it exactly with lte.
+      // Otherwise round up to next minute boundary so the full final minute is captured.
+      if (toDate.getSeconds() !== 0 || toDate.getMilliseconds() !== 0) {
+        // Round up to end of the specified second (set ms to 999) so the full second is captured.
+        toDate.setMilliseconds(999);
+        range.lte = toDate.toISOString();
+      } else {
+        range.lt = dateRangeEndExclusive(toDate).toISOString();
+      }
+    }
   }
   return range;
 }

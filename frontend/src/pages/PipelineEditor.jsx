@@ -923,13 +923,13 @@ export default function PipelineEditor() {
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <label className="label">From</label>
-                      <input type="datetime-local" className="input w-full" value={form.pull_from_date}
+                      <input type="datetime-local" step="1" className="input w-full" value={form.pull_from_date}
                         onChange={e => set('pull_from_date', e.target.value)} />
                     </div>
                     {form.pull_mode === 'date_range' && (
                       <div>
                         <label className="label">To</label>
-                        <input type="datetime-local" className="input w-full" value={form.pull_to_date}
+                        <input type="datetime-local" step="1" className="input w-full" value={form.pull_to_date}
                           onChange={e => set('pull_to_date', e.target.value)} />
                       </div>
                     )}
