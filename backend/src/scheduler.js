@@ -207,12 +207,8 @@ async function runLoop(pipelineId, token) {
         // date_range + parallel workers: split the full date range across N time-window workers.
         // Covers the entire range in one parallel run, then auto-pauses. Sequential PIT is used
         // when parallel_slices=1 (handled in the normal path below).
-        const from = new Date(pipeline.pull_from_date);
-        // Advance a minute-granularity "to" to the start of the next minute so the parallel
-        // chunker's exclusive [from, to) window includes the whole selected final minute
-        // (otherwise a "11:59 PM" = 23:59:00 end drops 23:59:00–23:59:59.999, ~one minute
-        // of events, and undercounts vs reconciliation which rounds lte up to end-of-minute).
-        const to   = pipeline.pull_to_date ? runner.dateRangeEndExclusive(new Date(pipeline.pull_to_date)) : new Date();
+        const from = runner.normaliseFrom(new Date(pipeline.pull_from_date));
+        const to   = pipeline.pull_to_date ? runner.normaliseTo(new Date(pipeline.pull_to_date)) : new Date();
         if (isNaN(from.getTime())) {
           pauseWithError(db, pipelineId, 'date_range: invalid pull_from_date');
           break;
