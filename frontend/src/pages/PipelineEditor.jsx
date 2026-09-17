@@ -591,7 +591,7 @@ export default function PipelineEditor() {
         // When timestamp_field is a device-local field (e.g. 'timestamp' storing AEST),
         // pass values as local datetime strings — no UTC conversion — so OpenSearch
         // compares against the stored local values correctly.
-        const isLocalField = form.timestamp_field && form.timestamp_field !== '@timestamp';
+        const isLocalField = form.timestamp_field && form.timestamp_field !== '@timestamp' && !form.timestamp_field.endsWith('_utc');
         const fmtLocal = (d) => {
           const pad = n => String(n).padStart(2, '0');
           return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ` +
