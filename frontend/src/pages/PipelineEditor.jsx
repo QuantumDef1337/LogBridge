@@ -588,9 +588,18 @@ export default function PipelineEditor() {
       let windowLabel = 'Entire index';
 
       if (form.pull_mode === 'date_range') {
+        // When timestamp_field is a device-local field (e.g. 'timestamp' storing AEST),
+        // pass values as local datetime strings — no UTC conversion — so OpenSearch
+        // compares against the stored local values correctly.
+        const isLocalField = form.timestamp_field && form.timestamp_field !== '@timestamp';
+        const fmtLocal = (d) => {
+          const pad = n => String(n).padStart(2, '0');
+          return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ` +
+                 `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.000`;
+        };
         if (form.pull_from_date) {
           const d = new Date(form.pull_from_date); d.setMilliseconds(0);
-          opts.from = d.toISOString();
+          opts.from = isLocalField ? fmtLocal(d) : d.toISOString();
         }
         if (form.pull_to_date) {
           const d = new Date(form.pull_to_date);
@@ -603,7 +612,7 @@ export default function PipelineEditor() {
           } else {
             d.setMilliseconds(999);
           }
-          opts.to = d.toISOString();
+          opts.to = isLocalField ? fmtLocal(d) : d.toISOString();
         }
         const f = form.pull_from_date ? new Date(form.pull_from_date).toLocaleDateString() : '?';
         const t = form.pull_to_date   ? new Date(form.pull_to_date).toLocaleDateString()   : '?';
