@@ -6,12 +6,46 @@ import { api } from '../api';
 const STEPS = ['Source', 'Destination', 'Field Mapping', 'Tagging & Batching', 'Review'];
 
 // ── Schedule presets ──────────────────────────────────────────────────────────
+function nextCronTrigger(intervalHours, dayOfWeek) {
+  const now = new Date();
+  const trigger = new Date(now);
+  if (dayOfWeek !== undefined) {
+    // next Sunday midnight
+    const daysUntil = (7 - now.getDay() + dayOfWeek) % 7 || 7;
+    trigger.setDate(now.getDate() + daysUntil);
+    trigger.setHours(0, 0, 0, 0);
+  } else {
+    // next multiple of intervalHours
+    const h = now.getHours();
+    const nextH = Math.ceil((h + 1) / intervalHours) * intervalHours;
+    if (nextH >= 24) {
+      trigger.setDate(now.getDate() + 1);
+      trigger.setHours(0, 0, 0, 0);
+    } else {
+      trigger.setHours(nextH, 0, 0, 0);
+    }
+  }
+  return trigger;
+}
+
+function fmtPresetExample(trigger, lookbackHours) {
+  const from = new Date(trigger.getTime() - lookbackHours * 3600 * 1000);
+  const fmtDate = d => d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const fmtTime = d => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const triggerStr = `${fmtDate(trigger)} at ${fmtTime(trigger)}`;
+  const fromStr = from.getDate() !== trigger.getDate()
+    ? `${fmtDate(from)} ${fmtTime(from)}`
+    : fmtTime(from);
+  const toStr = fmtTime(trigger);
+  return `${triggerStr}  →  pulls ${fromStr} to ${toStr}`;
+}
+
 const SCHEDULE_PRESETS = [
   {
     id: 'daily',
     label: 'Daily at midnight — pull full previous day',
     fireTimes: 'Fires once a day at 12:00 AM (midnight)',
-    example: 'Sep 10 at 12:00 AM  →  pulls Sep 9 00:00 AM to Sep 10 00:00 AM (full previous day)',
+    get example() { const t = nextCronTrigger(24); return fmtPresetExample(t, 24) + ' (full previous day)'; },
     cron: '0 0 * * *',
     lookback: 24,
   },
@@ -19,7 +53,7 @@ const SCHEDULE_PRESETS = [
     id: 'every6h',
     label: 'Every 6 hours — pull previous 6 hours',
     fireTimes: 'Fires 4× per day at 12:00 AM, 06:00 AM, 12:00 PM, 06:00 PM',
-    example: 'Sep 10 at 06:00 AM  →  pulls Sep 10 12:00 AM to 06:00 AM (6-hour window)',
+    get example() { const t = nextCronTrigger(6); return fmtPresetExample(t, 6) + ' (6-hour window)'; },
     cron: '0 */6 * * *',
     lookback: 6,
   },
@@ -27,7 +61,7 @@ const SCHEDULE_PRESETS = [
     id: 'hourly',
     label: 'Every hour — pull previous hour',
     fireTimes: 'Fires 24× per day at the top of every hour (01:00, 02:00 … 24:00)',
-    example: 'Sep 10 at 03:00 AM  →  pulls Sep 10 02:00 AM to 03:00 AM (1-hour window)',
+    get example() { const t = nextCronTrigger(1); return fmtPresetExample(t, 1) + ' (1-hour window)'; },
     cron: '0 * * * *',
     lookback: 1,
   },
@@ -35,7 +69,7 @@ const SCHEDULE_PRESETS = [
     id: 'weekly',
     label: 'Weekly on Sunday midnight — pull previous 7 days',
     fireTimes: 'Fires once a week on Sunday at 12:00 AM (midnight)',
-    example: 'Sep 13 (Sunday) at 12:00 AM  →  pulls Sep 6 to Sep 13 (7-day window)',
+    get example() { const t = nextCronTrigger(168, 0); return fmtPresetExample(t, 168) + ' (7-day window)'; },
     cron: '0 0 * * 0',
     lookback: 168,
   },
@@ -561,7 +595,14 @@ export default function PipelineEditor() {
         if (form.pull_to_date) {
           const d = new Date(form.pull_to_date);
           const isMidnight = d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0;
-          d.setMilliseconds(isMidnight ? 0 : 999);
+          if (isMidnight) {
+            d.setMilliseconds(0);
+          } else if (d.getSeconds() === 0) {
+            d.setSeconds(59);
+            d.setMilliseconds(999);
+          } else {
+            d.setMilliseconds(999);
+          }
           opts.to = d.toISOString();
         }
         const f = form.pull_from_date ? new Date(form.pull_from_date).toLocaleDateString() : '?';
@@ -930,17 +971,22 @@ export default function PipelineEditor() {
                 <div className="mt-2 pl-6 space-y-4">
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="label">From</label>
+                      <label className="label">From <span className="text-slate-500 font-normal">(local time)</span></label>
                       <input type="datetime-local" step="1" className="input w-full" value={form.pull_from_date}
                         onChange={e => set('pull_from_date', e.target.value)} />
                     </div>
                     {form.pull_mode === 'date_range' && (
                       <div>
-                        <label className="label">To</label>
+                        <label className="label">To <span className="text-slate-500 font-normal">(local time)</span></label>
                         <input type="datetime-local" step="1" className="input w-full" value={form.pull_to_date}
                           onChange={e => set('pull_to_date', e.target.value)} />
                       </div>
                     )}
+                  </div>
+
+                  <div className="flex items-start gap-2 bg-slate-800/60 border border-slate-600/50 rounded-lg px-3 py-2 text-xs text-slate-400">
+                    <span className="mt-0.5 text-slate-500">ℹ</span>
+                    <span>Times are in your <strong className="text-slate-300">browser&apos;s local timezone</strong> and converted to UTC automatically. Make sure your browser timezone matches the device&apos;s log timezone for accurate results.</span>
                   </div>
 
                   {form.pull_mode === 'date_range' && (

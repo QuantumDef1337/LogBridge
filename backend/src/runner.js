@@ -329,11 +329,19 @@ function normaliseFrom(d) {
 
 // Normalise a pipeline "to" date:
 //   - Midnight (00:00:00.000) → kept exact (.000) — user means end-of-previous-day boundary.
-//   - Any other time          → ms set to 999     — captures the full specified second.
+//   - Round minute (:00 sec)  → sec=59, ms=999   — user picked minute-granularity; capture full minute.
+//   - Explicit seconds        → ms set to 999     — captures the full specified second.
 function normaliseTo(d) {
   const r = new Date(d);
   const isMidnight = r.getHours() === 0 && r.getMinutes() === 0 && r.getSeconds() === 0;
-  r.setMilliseconds(isMidnight ? 0 : 999);
+  if (isMidnight) {
+    r.setMilliseconds(0);
+  } else if (r.getSeconds() === 0) {
+    r.setSeconds(59);
+    r.setMilliseconds(999);
+  } else {
+    r.setMilliseconds(999);
+  }
   return r;
 }
 
