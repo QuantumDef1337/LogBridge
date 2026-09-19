@@ -441,6 +441,15 @@ export default function PipelineEditor() {
   const [lookbackValue, setLookbackValue] = useState(15);
   const [lookbackUnit, setLookbackUnit] = useState('minutes');
   const [lookbackOverridden, setLookbackOverridden] = useState(false);
+  const [lookbackMode, setLookbackMode] = useState('relative'); // 'relative' | 'absolute'
+  const [absFrom, setAbsFrom] = useState(() => {
+    const d = new Date(); d.setHours(d.getHours() - 24, 0, 0, 0);
+    return d.toISOString().slice(0, 16);
+  });
+  const [absTo, setAbsTo] = useState(() => {
+    const d = new Date(); d.setMinutes(0, 0, 0);
+    return d.toISOString().slice(0, 16);
+  });
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [cronSource, setCronSource] = useState('builder'); // 'builder' | 'advanced'
   const [advancedCronInput, setAdvancedCronInput] = useState('');
@@ -1243,25 +1252,91 @@ export default function PipelineEditor() {
 
                             {/* Lookback window */}
                             <div>
-                              <label className="label text-xs mb-1">Lookback window</label>
-                              <div className="flex items-center gap-2">
-                                <input type="number" className="input w-20 text-sm text-center" min={1}
-                                  value={lookbackValue}
-                                  onChange={e => handleLookbackChange(Math.max(1, +e.target.value || 1), lookbackUnit)} />
-                                <select className="input text-sm" value={lookbackUnit}
-                                  onChange={e => handleLookbackChange(lookbackValue, e.target.value)}>
-                                  <option value="minutes">Minutes</option>
-                                  <option value="hours">Hours</option>
-                                  <option value="days">Days</option>
-                                </select>
-                                {lookbackOverridden && (
-                                  <button type="button" onClick={resetLookback}
-                                    className="text-xs text-brand-400 hover:text-brand-300 underline whitespace-nowrap">
-                                    Reset to recommended
+                              <label className="label text-xs mb-2">Lookback window</label>
+
+                              {/* Relative / Absolute tab switcher */}
+                              <div className="flex rounded-md border border-slate-700 overflow-hidden text-xs mb-2 w-fit">
+                                {['relative', 'absolute'].map(mode => (
+                                  <button key={mode} type="button"
+                                    onClick={() => {
+                                      setLookbackMode(mode);
+                                      if (mode === 'relative') {
+                                        handleLookbackChange(lookbackValue, lookbackUnit);
+                                      }
+                                    }}
+                                    className={`px-4 py-1.5 capitalize transition-colors ${
+                                      lookbackMode === mode
+                                        ? 'bg-brand-600 text-white'
+                                        : 'text-slate-400 hover:text-white hover:bg-slate-700/50'
+                                    }`}>
+                                    {mode.charAt(0).toUpperCase() + mode.slice(1)}
                                   </button>
-                                )}
+                                ))}
                               </div>
-                              {showOverlapWarn && (
+
+                              {lookbackMode === 'relative' ? (
+                                <div className="flex items-center gap-2">
+                                  <input type="number" className="input w-20 text-sm text-center" min={1}
+                                    value={lookbackValue}
+                                    onChange={e => handleLookbackChange(Math.max(1, +e.target.value || 1), lookbackUnit)} />
+                                  <select className="input text-sm" value={lookbackUnit}
+                                    onChange={e => handleLookbackChange(lookbackValue, e.target.value)}>
+                                    <option value="minutes">Minutes</option>
+                                    <option value="hours">Hours</option>
+                                    <option value="days">Days</option>
+                                  </select>
+                                  {lookbackOverridden && (
+                                    <button type="button" onClick={resetLookback}
+                                      className="text-xs text-brand-400 hover:text-brand-300 underline whitespace-nowrap">
+                                      Reset to recommended
+                                    </button>
+                                  )}
+                                </div>
+                              ) : (
+                                <div className="space-y-2">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-xs text-slate-400 w-8">From</span>
+                                    <input type="datetime-local" className="input flex-1 text-sm font-mono"
+                                      value={absFrom}
+                                      onChange={e => {
+                                        const from = e.target.value;
+                                        setAbsFrom(from);
+                                        if (from && absTo) {
+                                          const diffH = (new Date(absTo) - new Date(from)) / 3600000;
+                                          if (diffH > 0) { setLookbackOverridden(true); set('schedule_lookback_hours', diffH); }
+                                        }
+                                      }} />
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-xs text-slate-400 w-8">To</span>
+                                    <input type="datetime-local" className="input flex-1 text-sm font-mono"
+                                      value={absTo}
+                                      onChange={e => {
+                                        const to = e.target.value;
+                                        setAbsTo(to);
+                                        if (absFrom && to) {
+                                          const diffH = (new Date(to) - new Date(absFrom)) / 3600000;
+                                          if (diffH > 0) { setLookbackOverridden(true); set('schedule_lookback_hours', diffH); }
+                                        }
+                                      }} />
+                                  </div>
+                                  {absFrom && absTo && new Date(absTo) > new Date(absFrom) && (
+                                    <p className="text-xs text-teal-400">
+                                      Window: {(() => {
+                                        const h = (new Date(absTo) - new Date(absFrom)) / 3600000;
+                                        if (h < 1) return `${Math.round(h * 60)} minutes`;
+                                        if (h % 24 === 0) return `${h / 24} day${h / 24 !== 1 ? 's' : ''}`;
+                                        return `${h % 1 === 0 ? h : h.toFixed(1)} hours`;
+                                      })()}
+                                    </p>
+                                  )}
+                                  {absFrom && absTo && new Date(absTo) <= new Date(absFrom) && (
+                                    <p className="text-xs text-red-400">"To" must be after "From".</p>
+                                  )}
+                                </div>
+                              )}
+
+                              {showOverlapWarn && lookbackMode === 'relative' && (
                                 <p className="text-xs text-amber-400 mt-1.5">
                                   ⚠️ Lookback is larger than the schedule interval. Overlapping time windows will be processed on each run.
                                 </p>
