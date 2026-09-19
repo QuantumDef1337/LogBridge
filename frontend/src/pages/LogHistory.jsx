@@ -124,7 +124,7 @@ function RunHistoryTab({ tz }) {
       {/* Filter bar */}
       <div style={{ border: '1px solid var(--border)', borderRadius: 12, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', background: 'var(--surface)', marginBottom: 12 }}>
         <Filter size={13} className="text-slate-500" />
-        <select value={pipelineId} onChange={e => setPipelineId(e.target.value)} className="input" style={{ fontSize: 12, height: 32, width: 220, flexShrink: 0 }}>
+        <select value={pipelineId} onChange={e => setPipelineId(e.target.value)} className="select" style={{ fontSize: 12, width: 220, flexShrink: 0 }}>
           <option value="">All pipelines</option>
           {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
         </select>
@@ -385,20 +385,20 @@ export default function LogHistory() {
             />
           </div>
           {/* Level */}
-          <select value={level} onChange={e => setLevel(e.target.value)} className="select" style={{ fontSize: 12, height: 32 }}>
+          <select value={level} onChange={e => setLevel(e.target.value)} className="select" style={{ fontSize: 12 }}>
             <option value="">All levels</option>
             <option value="info">Info</option>
             <option value="warn">Warn</option>
             <option value="error">Error</option>
           </select>
-          <select value={pipelineId} onChange={e => setPipelineId(e.target.value)} className="select" style={{ fontSize: 12, height: 32 }}>
+          <select value={pipelineId} onChange={e => setPipelineId(e.target.value)} className="select" style={{ fontSize: 12 }}>
             <option value="">All pipelines</option>
             {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
           </select>
           <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
-            className="input" style={{ fontSize: 12, height: 32 }} title="From date" />
+            className="input" style={{ fontSize: 12 }} title="From date" />
           <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
-            className="input" style={{ fontSize: 12, height: 32 }} title="To date" />
+            className="input" style={{ fontSize: 12 }} title="To date" />
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
           <span style={{ fontSize: 11, color: 'var(--ink-3)' }}>Rows per page:</span>

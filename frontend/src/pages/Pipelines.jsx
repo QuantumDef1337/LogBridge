@@ -113,12 +113,9 @@ function IconBtn({ onClick, disabled, title, children, color = '' }) {
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className={`group relative flex items-center justify-center w-7 h-7 rounded-md hover:bg-slate-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${color}`}
+      className={`flex items-center justify-center w-7 h-7 rounded-md hover:bg-slate-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${color}`}
     >
       {children}
-      <span className="pointer-events-none absolute bottom-full mb-1.5 left-1/2 -translate-x-1/2 whitespace-nowrap text-[10px] bg-slate-800 border border-slate-700 text-slate-200 px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity z-10">
-        {title}
-      </span>
     </button>
   );
 }
@@ -804,18 +801,18 @@ function PipelineCard({
         {/* Cursor + Last run */}
         <div className="hidden md:block flex-shrink-0 text-right text-xs space-y-1.5">
           <div>
-            <div className="text-slate-500">Last run</div>
-            <div className="text-slate-300 mt-0.5">{p.last_run_at ? fmtRelative(p.last_run_at) : '—'}</div>
+            <div style={{ color: 'var(--ink-3)' }}>Last run</div>
+            <div style={{ color: 'var(--ink)', marginTop: 2 }}>{p.last_run_at ? fmtRelative(p.last_run_at) : '—'}</div>
             {p.last_success_at && (
-              <div className="text-slate-600">ok {fmtRelative(p.last_success_at)}</div>
+              <div style={{ color: 'var(--ink-3)' }}>ok {fmtRelative(p.last_success_at)}</div>
             )}
           </div>
-          <div className="border-t border-slate-800/60 pt-1.5">
-            <div className="text-slate-500 mb-0.5">Checkpoint saved</div>
+          <div style={{ borderTop: '1px solid var(--border-soft)', paddingTop: 6 }}>
+            <div style={{ color: 'var(--ink-3)', marginBottom: 2 }}>Checkpoint saved</div>
             {p.checkpoint_committed_at ? (
-              <div className="font-mono text-slate-300 text-[10px]">{fmtTs(p.checkpoint_committed_at)}</div>
+              <div style={{ fontFamily: '"JetBrains Mono", monospace', color: 'var(--ink-2)', fontSize: 10 }}>{fmtTs(p.checkpoint_committed_at)}</div>
             ) : (
-              <div className="text-slate-600 text-[10px]">never</div>
+              <div style={{ color: 'var(--ink-3)', fontSize: 10 }}>never</div>
             )}
           </div>
         </div>
@@ -1138,23 +1135,23 @@ export default function Pipelines() {
         <div style={{
           marginBottom: '16px', borderRadius: '14px',
           padding: '14px 16px',
-          background: result.ok === null ? 'rgba(255,255,255,0.04)'
-            : result.ok ? 'rgba(52,211,153,0.07)'
+          background: result.ok === null ? 'var(--surface)'
+            : result.ok ? 'rgba(20,184,166,0.07)'
             : 'rgba(239,68,68,0.07)',
-          border: `1px solid ${result.ok === null ? 'rgba(255,255,255,0.08)'
-            : result.ok ? 'rgba(52,211,153,0.18)'
+          border: `1px solid ${result.ok === null ? 'var(--border)'
+            : result.ok ? 'rgba(20,184,166,0.25)'
             : 'rgba(239,68,68,0.18)'}`,
         }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '16px' }}>
             <div style={{ minWidth: 0 }}>
-              <div style={{ color: 'rgba(255,255,255,0.80)', fontSize: '13px', fontWeight: 600 }}>{result.pipeline}</div>
-              <div style={{ color: result.ok === false ? '#f87171' : 'rgba(255,255,255,0.50)', fontSize: '12px', marginTop: '3px' }}>{result.msg}</div>
+              <div style={{ color: 'var(--ink)', fontSize: '13px', fontWeight: 600 }}>{result.pipeline}</div>
+              <div style={{ color: result.ok === false ? 'var(--coral)' : 'var(--ink-3)', fontSize: '12px', marginTop: '3px' }}>{result.msg}</div>
               {result.sample && (
                 <pre style={{
                   marginTop: '10px', fontSize: '11px', fontFamily: '"JetBrains Mono", monospace',
-                  background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.06)',
+                  background: 'var(--canvas)', border: '1px solid var(--border)',
                   borderRadius: '10px', padding: '12px', overflowX: 'auto',
-                  color: 'rgba(255,255,255,0.55)', maxHeight: '200px',
+                  color: 'var(--ink-2)', maxHeight: '200px',
                 }}>{result.sample}</pre>
               )}
             </div>
