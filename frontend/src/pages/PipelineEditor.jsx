@@ -1273,6 +1273,19 @@ export default function PipelineEditor() {
                               <div className="bg-slate-800/60 border border-slate-700 rounded-lg px-3 py-2.5 text-xs space-y-1">
                                 <div className="text-white font-medium">{description}</div>
                                 {nextRunStr && <div className="text-slate-400">Next run: <span className="text-brand-300">{nextRunStr}</span></div>}
+                                {nextRunDate && (() => {
+                                  const lbMs = lookbackToHours(lookbackValue, lookbackUnit) * 3600 * 1000;
+                                  const from = new Date(nextRunDate.getTime() - lbMs);
+                                  const fmtDt = d => d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                                  return (
+                                    <div className="text-slate-400">
+                                      Pulls: <span className="text-teal-300">{fmtDt(from)}</span>
+                                      {' → '}
+                                      <span className="text-teal-300">{fmtDt(nextRunDate)}</span>
+                                      <span className="text-slate-500 ml-1">({lookbackValue} {lookbackUnit} window)</span>
+                                    </div>
+                                  );
+                                })()}
                                 <div className="text-slate-500 font-mono pt-0.5">Generated cron: <span className="text-slate-300">{generatedCron}</span></div>
                               </div>
                             )}
