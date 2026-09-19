@@ -1415,19 +1415,30 @@ export default function PipelineEditor() {
                                 {nextRunStr && <div className="text-slate-400">Next run: <span className="text-brand-300">{nextRunStr}</span></div>}
                                 {nextRunDate && (() => {
                                   const lbH = form.schedule_lookback_hours || lookbackToHours(lookbackValue, lookbackUnit);
-                                  const lbMs = lbH * 3600 * 1000;
-                                  const from = new Date(nextRunDate.getTime() - lbMs);
                                   const fmtDt = d => d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                                  const windowLabel = lbH < 1 ? `${Math.round(lbH * 60)} min` :
+                                    lbH % 24 === 0 ? `${lbH / 24} day${lbH / 24 !== 1 ? 's' : ''}` :
+                                    `${Number.isInteger(lbH) ? lbH : lbH.toFixed(1)}h`;
+
+                                  let from, to;
+                                  const isAbsTimeOnly = lookbackMode === 'absolute' && ['daily', 'weekly', 'monthly'].includes(cronBuilder.type);
+                                  if (isAbsTimeOnly) {
+                                    // Show the exact From/To times the user picked, anchored to the trigger date
+                                    const [fh, fm] = absFromTime.split(':').map(Number);
+                                    const [th, tm] = absToTime.split(':').map(Number);
+                                    from = new Date(nextRunDate); from.setHours(fh, fm, 0, 0);
+                                    to = new Date(nextRunDate); to.setHours(th, tm, 0, 0);
+                                    if (to <= from) to.setDate(to.getDate() + 1); // crosses midnight
+                                  } else {
+                                    from = new Date(nextRunDate.getTime() - lbH * 3600 * 1000);
+                                    to = nextRunDate;
+                                  }
                                   return (
                                     <div className="text-slate-400">
                                       Pulls: <span className="text-teal-300">{fmtDt(from)}</span>
                                       {' → '}
-                                      <span className="text-teal-300">{fmtDt(nextRunDate)}</span>
-                                      <span className="text-slate-500 ml-1">({
-                                        lbH < 1 ? `${Math.round(lbH * 60)} min` :
-                                        lbH % 24 === 0 ? `${lbH / 24} day${lbH / 24 !== 1 ? 's' : ''}` :
-                                        `${Number.isInteger(lbH) ? lbH : lbH.toFixed(1)}h`
-                                      } window)</span>
+                                      <span className="text-teal-300">{fmtDt(to)}</span>
+                                      <span className="text-slate-500 ml-1">({windowLabel} window)</span>
                                     </div>
                                   );
                                 })()}
