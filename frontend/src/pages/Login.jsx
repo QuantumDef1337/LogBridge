@@ -14,9 +14,9 @@ const BRAND_MARK = (
 );
 
 const features = [
-  { label: 'Real-time ingestion', sub: 'Sub-second latency from OpenSearch to ClickHouse' },
-  { label: 'Parallel workers', sub: 'Multi-threaded batch processing with dedup' },
-  { label: 'Full audit trail', sub: 'Every event logged with checkpoint recovery' },
+  { label: 'Cursor-based continuity', sub: 'No gaps, no re-ingestion — picks up exactly where it left off' },
+  { label: 'Parallel slicing', sub: 'Split any time window across N workers, with built-in dedup' },
+  { label: 'Full observability', sub: 'Per-run logs, DLQ, checkpoint recovery, and reconciliation' },
 ];
 
 export default function Login() {
@@ -116,25 +116,25 @@ export default function Login() {
         {/* Hero copy */}
         <div style={{ maxWidth: 440 }}>
           <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'rgba(244,244,245,0.35)', marginBottom: 16 }}>
-            Log Infrastructure
+            Pipeline Observability
           </div>
           <h1 style={{
             fontWeight: 900, fontSize: 48, letterSpacing: '-0.04em',
             lineHeight: 1.0, color: '#f4f4f5', margin: '0 0 20px',
           }}>
-            Ship logs at{' '}
+            Move logs.{' '}
             <span style={{
               background: 'linear-gradient(135deg, #14b8a6 0%, #2dd4bf 100%)',
               WebkitBackgroundClip: 'text',
               WebkitTextFillColor: 'transparent',
               backgroundClip: 'text',
             }}>
-              scale.
+              Zero gaps.
             </span>
           </h1>
           <p style={{ fontSize: 15, lineHeight: 1.65, color: 'rgba(244,244,245,0.55)', margin: 0, maxWidth: '38ch' }}>
-            OpenSearch to ClickHouse, in real time. Parallel workers,
-            intelligent dedup, and a full audit trail.
+            Pull from OpenSearch, land in ClickHouse — with cursor-based
+            continuity, parallel slices, and a complete audit trail.
           </p>
 
           <div style={{ marginTop: 40, display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -161,13 +161,13 @@ export default function Login() {
         {/* Bottom status bar */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: 'rgba(244,244,245,0.28)' }}>
           <Activity size={12} style={{ color: '#14b8a6' }} />
-          System operational
+          All pipelines reachable
           <span style={{ marginLeft: 8, display: 'flex', alignItems: 'center', gap: 5 }}>
             <span style={{
               width: 6, height: 6, borderRadius: '50%', background: '#34d399',
               boxShadow: '0 0 6px rgba(52,211,153,0.6)',
             }} />
-            All systems normal
+            Backend healthy
           </span>
         </div>
       </div>
@@ -188,7 +188,7 @@ export default function Login() {
                 Sign in
               </h2>
               <p style={{ fontSize: 13, color: 'var(--ink-3)', margin: 0 }}>
-                Enter your credentials to access the dashboard.
+                Access your pipeline control plane.
               </p>
             </div>
 
