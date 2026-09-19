@@ -2,7 +2,7 @@
 
 const router = require('express').Router();
 const { getDb } = require('../db');
-const { requireAuth } = require('../auth');
+const { requireAuth, requireAdmin } = require('../auth');
 const os = require('../services/opensearch');
 const { encrypt, decryptRow } = require('../crypto');
 const audit = require('../audit');
@@ -27,7 +27,7 @@ router.get('/:id', (req, res) => {
   res.json(row);
 });
 
-router.post('/', (req, res) => {
+router.post('/', requireAdmin, (req, res) => {
   const { name, url, username, password, tls_verify } = req.body;
   if (!name || !url || !username || !password)
     return res.status(400).json({ error: 'name, url, username, password required' });
@@ -38,7 +38,7 @@ router.post('/', (req, res) => {
   res.json({ id: r.lastInsertRowid });
 });
 
-router.put('/:id', (req, res) => {
+router.put('/:id', requireAdmin, (req, res) => {
   const { name, url, username, password, tls_verify } = req.body;
   const db = getDb();
   const existing = db.prepare('SELECT * FROM opensearch_connections WHERE id=?').get(req.params.id);
@@ -61,7 +61,7 @@ router.put('/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', requireAdmin, (req, res) => {
   const row = getDb().prepare('SELECT name FROM opensearch_connections WHERE id=?').get(req.params.id);
   getDb().prepare('DELETE FROM opensearch_connections WHERE id=?').run(req.params.id);
   audit.warn('connection', `OpenSearch connection deleted: "${row?.name || req.params.id}"`);

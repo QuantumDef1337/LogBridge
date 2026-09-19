@@ -8,6 +8,7 @@ import Pipelines from './pages/Pipelines';
 import PipelineEditor from './pages/PipelineEditor';
 import Jobs from './pages/Jobs';
 import LogHistory from './pages/LogHistory';
+import Settings from './pages/Settings';
 
 function PrivateRoute({ children }) {
   return localStorage.getItem('lb_token') ? children : <Navigate to="/login" replace />;
@@ -28,6 +29,7 @@ export default function App() {
           <Route path="pipelines/:id/edit" element={<PipelineEditor />} />
           <Route path="jobs" element={<Jobs />} />
           <Route path="log-history" element={<LogHistory />} />
+          <Route path="settings" element={<Settings />} />
         </Route>
       </Routes>
     </BrowserRouter>

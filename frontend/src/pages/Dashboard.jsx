@@ -1,29 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { GitBranch, CheckCircle, PauseCircle, AlertCircle, Database, Activity, HardDrive, Timer, RefreshCw } from 'lucide-react';
+import {
+  GitBranch, AlertCircle, ArrowRight, RefreshCw,
+} from 'lucide-react';
 import { api } from '../api';
 
-function StatCard({ icon: Icon, label, value, color = 'brand' }) {
-  const colors = {
-    brand: 'text-brand-400 bg-brand-500/10',
-    green: 'text-green-400 bg-green-500/10',
-    yellow: 'text-yellow-400 bg-yellow-500/10',
-    red: 'text-red-400 bg-red-500/10',
-    blue: 'text-blue-400 bg-blue-500/10',
-  };
-  return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-      <div className="flex items-center gap-3 mb-3">
-        <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${colors[color]}`}>
-          <Icon size={18} />
-        </div>
-        <span className="text-sm text-slate-400">{label}</span>
-      </div>
-      <div className="text-2xl font-bold text-white">{value}</div>
-    </div>
-  );
-}
-
+/* ─── Formatters ─────────────────────────────────────────────────────────── */
 function fmtBytes(b) {
   if (!b) return '0 B';
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
@@ -31,7 +13,6 @@ function fmtBytes(b) {
   while (b >= 1024 && i < units.length - 1) { b /= 1024; i++; }
   return `${b.toFixed(1)} ${units[i]}`;
 }
-
 function fmtNum(n) {
   if (!n) return '0';
   if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
@@ -39,14 +20,17 @@ function fmtNum(n) {
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
   return String(n);
 }
+function fmtLagShort(secs) {
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h`;
+  return `${Math.floor(secs / 86400)}d`;
+}
 
-// Fetches real CH stats for all pipelines and sums them.
-// Returns a shared hook so both cards read from one fetch.
+/* ─── CH Stats hook ──────────────────────────────────────────────────────── */
 function useChTotals(pipelines) {
   const [totals, setTotals] = useState(null);
-  // Key on last_success_at so we re-fetch whenever any pipeline completes a run
   const runKey = pipelines.map(p => p.last_success_at || '').join(',');
-
   const fetch = useCallback(() => {
     if (!pipelines.length) return;
     Promise.all(pipelines.map(p => api.getChStats(p.id).catch(() => null)))
@@ -54,100 +38,115 @@ function useChTotals(pipelines) {
         let compressed = 0, uncompressed = 0, rows = 0;
         for (const r of results) {
           if (!r) continue;
-          compressed += r.compressed_bytes || 0;
-          uncompressed += r.uncompressed_bytes || 0;
-          rows += r.rows || 0;
+          compressed   += r.compressed_bytes   || 0;
+          uncompressed += r.uncompressed_bytes  || 0;
+          rows         += r.rows                || 0;
         }
         setTotals({ compressed, uncompressed, rows });
       });
-  }, [runKey]); // eslint-disable-line react-hooks/exhaustive-deps
-
+  }, [runKey]); // eslint-disable-line
   useEffect(() => {
     fetch();
     const t = setInterval(fetch, 30000);
     return () => clearInterval(t);
   }, [fetch]);
-
   return totals;
 }
 
-function ChRowsCard({ totals }) {
+/* ─── Skeleton shimmer ───────────────────────────────────────────────────── */
+function Skeleton({ w = 56, h = 14 }) {
+  return <span className="skeleton" style={{ width: w, height: h }} />;
+}
+
+/* ─── Status badge ───────────────────────────────────────────────────────── */
+function StatusBadge({ status, run }) {
+  if (run === 'error')     return <span className="badge badge-error">Error</span>;
+  if (status === 'active') return <span className="badge badge-active">Active</span>;
+  return <span className="badge badge-paused">Paused</span>;
+}
+
+/* ─── Metric — Siphon-style stat card ────────────────────────────────────── */
+function StatCard({ label, value, accent, loading, sub, tone = 'default' }) {
+  const bg = tone === 'butter' ? 'var(--butter)'
+    : tone === 'ink'    ? 'var(--surface-ink)'
+    : tone === 'mint'   ? 'var(--surface-mint)'
+    : 'var(--surface)';
+  const valColor = tone === 'ink' ? 'var(--canvas-text)'
+    : accent || 'var(--ink)';
+  const labelColor = tone === 'ink'    ? 'var(--canvas-dim)'
+    : tone === 'butter' ? 'rgba(26,24,20,0.60)'
+    : 'var(--ink-3)';
+  const subColor = tone === 'ink'    ? 'var(--canvas-dim)'
+    : tone === 'butter' ? 'rgba(26,24,20,0.50)'
+    : 'var(--ink-4)';
+
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-      <div className="flex items-center gap-3 mb-3">
-        <div className="w-9 h-9 rounded-lg flex items-center justify-center text-emerald-400 bg-emerald-500/10">
-          <Database size={18} />
-        </div>
-        <span className="text-sm text-slate-400">Total Rows (CH actual)</span>
+    <div style={{
+      borderRadius: 20, padding: '20px 22px 18px',
+      background: bg,
+      border: '1px solid var(--border-soft)',
+      boxShadow: 'var(--shadow-card)',
+    }}>
+      <div style={{
+        fontSize: 10, fontWeight: 700,
+        letterSpacing: '0.10em', textTransform: 'uppercase',
+        color: labelColor, marginBottom: 8,
+      }}>
+        {label}
       </div>
-      {totals ? (
-        <div>
-          <div className="text-2xl font-bold text-emerald-400">{fmtNum(totals.rows)}</div>
-          <div className="text-xs text-slate-500 mt-1">sum of all pipelines · from system.parts</div>
+      <div style={{
+        fontSize: 30, fontWeight: 800,
+        letterSpacing: '-0.04em', lineHeight: 1,
+        color: valColor, fontVariantNumeric: 'tabular-nums',
+      }}>
+        {loading ? <Skeleton w={52} h={28} /> : value}
+      </div>
+      {sub && !loading && (
+        <div style={{ fontSize: 11, color: subColor, marginTop: 5 }}>
+          {sub}
         </div>
-      ) : (
-        <div className="text-2xl font-bold text-slate-600">—</div>
       )}
     </div>
   );
 }
 
-function ChStorageCard({ totals }) {
+/* Keep old Metric alias for the metric band */
+function Metric({ label, value, accent, loading, sub }) {
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-      <div className="flex items-center gap-3 mb-3">
-        <div className="w-9 h-9 rounded-lg flex items-center justify-center text-emerald-400 bg-emerald-500/10">
-          <HardDrive size={18} />
-        </div>
-        <span className="text-sm text-slate-400">ClickHouse Storage</span>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{
+        fontSize: 26, fontWeight: 800,
+        letterSpacing: '-0.04em', lineHeight: 1,
+        color: accent || 'var(--ink)',
+        fontVariantNumeric: 'tabular-nums',
+      }}>
+        {loading ? <Skeleton w={48} h={24} /> : value}
       </div>
-      {totals ? (
-        <div>
-          <div className="text-2xl font-bold text-white">{fmtBytes(totals.uncompressed)}</div>
-          <div className="text-xs text-slate-500 mt-1">{fmtBytes(totals.compressed)} on-disk · {(totals.uncompressed / Math.max(totals.compressed, 1)).toFixed(1)}× ratio</div>
-        </div>
-      ) : (
-        <div className="text-2xl font-bold text-slate-600">—</div>
+      <div style={{
+        fontSize: 10, fontWeight: 700,
+        color: 'var(--ink-3)', letterSpacing: '0.08em',
+        textTransform: 'uppercase',
+      }}>
+        {label}
+      </div>
+      {sub && !loading && (
+        <div style={{ fontSize: 10, color: 'var(--ink-4)', marginTop: 1 }}>{sub}</div>
       )}
     </div>
   );
 }
 
-function AvgLagCard({ pipelines }) {
-  const lags = pipelines.map(p => p.event_lag_secs).filter(v => v != null);
-  const avgLag = lags.length ? Math.round(lags.reduce((a, b) => a + b, 0) / lags.length) : null;
-
-  function fmtLagShort(secs) {
-    if (secs < 60) return `${secs}s`;
-    if (secs < 3600) return `${Math.floor(secs / 60)}m`;
-    if (secs < 86400) return `${Math.floor(secs / 3600)}h`;
-    return `${Math.floor(secs / 86400)}d`;
-  }
-
-  return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-      <div className="flex items-center gap-3 mb-3">
-        <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${avgLag != null && avgLag < 60 ? 'text-emerald-400 bg-emerald-500/10' : avgLag != null && avgLag < 3600 ? 'text-yellow-400 bg-yellow-500/10' : 'text-slate-400 bg-slate-700/30'}`}>
-          <Timer size={18} />
-        </div>
-        <span className="text-sm text-slate-400">Avg Event Lag</span>
-      </div>
-      <div className={`text-2xl font-bold ${avgLag != null && avgLag < 60 ? 'text-emerald-400' : avgLag != null && avgLag < 3600 ? 'text-yellow-400' : 'text-white'}`}>
-        {avgLag != null ? fmtLagShort(avgLag) : '—'}
-      </div>
-      <div className="text-xs text-slate-500 mt-1">{lags.length} pipeline{lags.length !== 1 ? 's' : ''} reporting</div>
-    </div>
-  );
-}
-
+/* ─── Main page ──────────────────────────────────────────────────────────── */
 export default function Dashboard() {
   const navigate = useNavigate();
-  const [stats, setStats]       = useState(null);
-  const [pipelines, setPipelines] = useState([]);
-  const [loading, setLoading]   = useState(true);
+  const [stats, setStats]           = useState(null);
+  const [pipelines, setPipelines]   = useState([]);
+  const [loading, setLoading]       = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const chTotals = useChTotals(pipelines);
 
-  async function load() {
+  async function load(manual = false) {
+    if (manual) setRefreshing(true);
     try {
       const [s, p] = await Promise.all([api.getStats(), api.getPipelines()]);
       setStats(s);
@@ -156,60 +155,168 @@ export default function Dashboard() {
       console.error(e);
     } finally {
       setLoading(false);
+      if (manual) setTimeout(() => setRefreshing(false), 600);
     }
   }
 
-  useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, []);
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 15000);
+    return () => clearInterval(t);
+  }, []);
 
   const erroring = pipelines.filter(p => p.run_status === 'error');
-  const recent = pipelines.filter(p => p.last_run_at).sort((a, b) => (b.last_run_at || '').localeCompare(a.last_run_at || '')).slice(0, 6);
+  const recent   = pipelines
+    .filter(p => p.last_run_at)
+    .sort((a, b) => (b.last_run_at || '').localeCompare(a.last_run_at || ''))
+    .slice(0, 8);
+
+  /* lag calc */
+  const lags   = pipelines.map(p => p.event_lag_secs).filter(v => v != null);
+  const avgLag = lags.length ? Math.round(lags.reduce((a, b) => a + b, 0) / lags.length) : null;
+  const lagAccent = avgLag == null ? 'var(--text-1)'
+    : avgLag < 60   ? '#34d399'
+    : avgLag < 3600 ? '#fbbf24'
+    : '#f87171';
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+    <div style={{ padding: '40px 48px 64px', maxWidth: 1200, margin: '0 auto' }}>
+
+      {/* ── Page header ── */}
+      <div style={{
+        display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between',
+        marginBottom: 32,
+      }}>
         <div>
-          <h1 className="text-xl font-bold text-white">Dashboard</h1>
-          <p className="text-sm text-slate-400 mt-0.5">Overview of all log pipelines</p>
+          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--ink-3)', marginBottom: 6 }}>
+            Dashboard
+          </div>
+          <h1 style={{
+            fontSize: 30, fontWeight: 800,
+            letterSpacing: '-0.03em', lineHeight: 1,
+            color: 'var(--ink)', margin: 0,
+          }}>
+            {loading ? 'Loading…' : `${stats?.active ?? '—'} pipeline${stats?.active !== 1 ? 's' : ''} running`}
+          </h1>
+          <p style={{
+            fontSize: 13, color: 'var(--ink-3)',
+            margin: '6px 0 0', fontWeight: 400,
+          }}>
+            Live ingestion metrics across all pipelines
+          </p>
         </div>
-        <button onClick={load} className="flex items-center gap-2 text-sm text-slate-400 hover:text-white transition-colors">
-          <RefreshCw size={14} />
+        <button
+          onClick={() => load(true)}
+          className="btn-ghost"
+          style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+        >
+          <RefreshCw
+            size={12}
+            style={{
+              transition: 'transform 600ms cubic-bezier(0.32,0.72,0,1)',
+              transform: refreshing ? 'rotate(360deg)' : 'none',
+            }}
+          />
           Refresh
         </button>
       </div>
 
-      {/* Stats */}
-      {stats && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-          <StatCard icon={GitBranch}    label="Total Pipelines"       value={stats.total}                     color="brand"  />
-          <StatCard icon={CheckCircle}  label="Active"                value={stats.active}                    color="green"  />
-          <StatCard icon={PauseCircle}  label="Paused"                value={stats.paused}                    color="yellow" />
-          <StatCard icon={AlertCircle}  label="Errors"                value={stats.erroring}                  color="red"    />
-          <StatCard icon={Activity}     label="Rows Today (tracked)"  value={fmtNum(stats.rows_today)}  color="blue"  />
-          <ChRowsCard   totals={chTotals} />
-          <ChStorageCard totals={chTotals} />
-          <AvgLagCard pipelines={pipelines} />
-        </div>
-      )}
+      {/* ── Stat cards — Siphon style ── */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(4, 1fr)',
+        gap: 14,
+        marginBottom: 40,
+      }}>
+        <StatCard
+          label="Total pipelines"
+          value={loading ? null : (stats?.total ?? '—')}
+          sub={`${stats?.active ?? 0} active · ${stats?.erroring ?? 0} error${stats?.erroring !== 1 ? 's' : ''}`}
+          tone="ink"
+          loading={loading}
+        />
+        <StatCard
+          label="Rows today"
+          value={loading ? null : fmtNum(stats?.rows_today)}
+          sub="inserted across all"
+          tone="default"
+          loading={loading}
+        />
+        <StatCard
+          label="CH rows total"
+          value={chTotals ? fmtNum(chTotals.rows) : null}
+          sub={chTotals ? 'from system.parts' : 'loading…'}
+          tone="butter"
+          loading={!chTotals}
+        />
+        <StatCard
+          label="Avg event lag"
+          value={avgLag != null ? fmtLagShort(avgLag) : (pipelines.length ? '—' : null)}
+          accent={lagAccent}
+          sub={lags.length ? `across ${lags.length} pipeline${lags.length !== 1 ? 's' : ''}` : null}
+          tone="default"
+          loading={loading}
+        />
+      </div>
 
-      {/* Errors */}
+      {/* ── Secondary metric band ── */}
+      <div style={{
+        display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)',
+        borderTop: '1px solid var(--border-soft)',
+        borderBottom: '1px solid var(--border-soft)',
+        marginBottom: 44,
+        background: 'var(--surface)',
+        borderRadius: 16,
+        overflow: 'hidden',
+        boxShadow: 'var(--shadow-card)',
+      }}>
+        {[
+          { label: 'Active',         value: stats?.active ?? '—',   accent: (stats?.active > 0) ? 'var(--mint)' : undefined, loading },
+          { label: 'Paused',         value: stats?.paused ?? '—',   accent: (stats?.paused > 0) ? '#a37600' : undefined, loading },
+          { label: 'Erroring',       value: stats?.erroring ?? '—', accent: (stats?.erroring > 0) ? 'var(--coral)' : undefined, loading },
+          { label: 'DLQ pending',    value: stats ? fmtNum(stats.dlq_pending ?? 0) : '—', accent: (stats?.dlq_pending > 0) ? '#fbbf24' : undefined, loading },
+          { label: 'CH uncompressed', value: chTotals ? fmtBytes(chTotals.uncompressed) : null, sub: chTotals ? 'raw size' : null, loading: !chTotals && !loading ? false : !chTotals },
+        ].map((m, i) => (
+          <div key={m.label} style={{
+            padding: '20px 22px 22px',
+            borderRight: i < 4 ? '1px solid var(--border-soft)' : 'none',
+          }}>
+            <Metric label={m.label} value={m.value ?? '—'} accent={m.accent} loading={m.loading} sub={m.sub} />
+          </div>
+        ))}
+      </div>
+
+      {/* ── Error callouts ── */}
       {erroring.length > 0 && (
-        <div className="mb-6">
-          <h2 className="text-sm font-semibold text-red-400 mb-3 flex items-center gap-2">
-            <AlertCircle size={14} /> Pipeline Errors
-          </h2>
-          <div className="space-y-2">
+        <div style={{ marginBottom: 32 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 10 }}>
+            <AlertCircle size={11} style={{ color: 'var(--coral)' }} />
+            <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.10em', color: 'var(--coral)' }}>
+              Pipeline errors
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {erroring.map(p => (
-              <div key={p.id} className="bg-red-900/20 border border-red-800 rounded-lg px-4 py-3 flex items-start justify-between gap-4">
+              <div key={p.id} style={{
+                background: 'var(--coral-tint)',
+                border: '1px solid rgba(232,80,58,0.15)',
+                borderRadius: 14, padding: '12px 18px',
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16,
+              }}>
                 <div>
-                  <div className="text-sm font-medium text-white">{p.name}</div>
-                  <div className="text-xs text-red-400 mt-0.5">{p.last_error || 'Unknown error'}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>{p.name}</div>
+                  <div style={{ color: 'var(--coral)', fontSize: 11, marginTop: 2 }}>{p.last_error || 'Unknown error'}</div>
                 </div>
-                <button
-                  onClick={() => navigate(`/pipelines/${p.id}/edit`)}
-                  className="text-xs text-slate-400 hover:text-white whitespace-nowrap"
+                <button onClick={() => navigate(`/pipelines/${p.id}/edit`)} style={{
+                  display: 'flex', alignItems: 'center', gap: 4,
+                  color: 'var(--ink-3)', fontSize: 11,
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  transition: 'color 200ms', whiteSpace: 'nowrap', fontFamily: 'inherit',
+                }}
+                  onMouseEnter={e => e.currentTarget.style.color = 'var(--ink)'}
+                  onMouseLeave={e => e.currentTarget.style.color = 'var(--ink-3)'}
                 >
-                  Edit →
+                  Edit <ArrowRight size={10} />
                 </button>
               </div>
             ))}
@@ -217,45 +324,63 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Recent pipelines */}
+      {/* ── Recent activity table ── */}
       <div>
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-semibold text-slate-300">Recent Activity</h2>
-          <button onClick={() => navigate('/pipelines')} className="text-xs text-brand-400 hover:text-brand-300">
-            View all →
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+          <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--ink-3)', letterSpacing: '0.10em', textTransform: 'uppercase' }}>
+            Recent activity
+          </span>
+          <button onClick={() => navigate('/pipelines')} style={{
+            display: 'flex', alignItems: 'center', gap: 4,
+            color: 'var(--coral)', fontSize: 12,
+            background: 'none', border: 'none', cursor: 'pointer',
+            transition: 'opacity 160ms', fontFamily: 'inherit', fontWeight: 600,
+          }}
+            onMouseEnter={e => e.currentTarget.style.opacity = '0.75'}
+            onMouseLeave={e => e.currentTarget.style.opacity = '1'}
+          >
+            View all <ArrowRight size={11} />
           </button>
         </div>
-        <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+
+        <div className="card-shell">
           {recent.length === 0 ? (
-            <div className="text-center py-12 text-slate-500 text-sm">
-              No pipelines yet.{' '}
-              <button onClick={() => navigate('/pipelines/new')} className="text-brand-400 hover:underline">
-                Create one →
+            <div style={{ padding: '64px 24px', textAlign: 'center' }}>
+              <div style={{ fontSize: 13, color: 'var(--ink-3)', fontWeight: 500, marginBottom: 8 }}>No pipelines yet</div>
+              <button onClick={() => navigate('/pipelines/new')} style={{
+                color: 'var(--coral)', background: 'none', border: 'none',
+                cursor: 'pointer', fontSize: 12, fontFamily: 'inherit', fontWeight: 600,
+              }}>
+                Create your first pipeline →
               </button>
             </div>
           ) : (
-            <table className="w-full text-sm">
+            <table className="data-table">
               <thead>
-                <tr className="border-b border-slate-800 text-left text-xs text-slate-500">
-                  <th className="px-4 py-3 font-medium">Pipeline</th>
-                  <th className="px-4 py-3 font-medium">Status</th>
-                  <th className="px-4 py-3 font-medium">Rows Today</th>
-                  <th className="px-4 py-3 font-medium">Last Run</th>
-                  <th className="px-4 py-3 font-medium">Destination</th>
+                <tr>
+                  {['Pipeline', 'Status', 'Rows today', 'Last run', 'Destination'].map(h => (
+                    <th key={h}>{h}</th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
                 {recent.map(p => (
-                  <tr
-                    key={p.id}
-                    onClick={() => navigate(`/pipelines/${p.id}/edit`)}
-                    className="border-b border-slate-800 last:border-0 hover:bg-slate-800/50 cursor-pointer transition-colors"
-                  >
-                    <td className="px-4 py-3 text-white font-medium">{p.name}</td>
-                    <td className="px-4 py-3"><StatusBadge status={p.status} run={p.run_status} /></td>
-                    <td className="px-4 py-3 text-slate-300">{fmtNum(p.rows_inserted_today)}</td>
-                    <td className="px-4 py-3 text-slate-400 text-xs">{p.last_run_at ? new Date(p.last_run_at).toLocaleString() : '—'}</td>
-                    <td className="px-4 py-3 text-slate-400 text-xs">{p.clickhouse_database}.{p.clickhouse_table}</td>
+                  <tr key={p.id} onClick={() => navigate(`/pipelines/${p.id}/edit`)}>
+                    <td style={{ fontWeight: 600 }}>{p.name}</td>
+                    <td><StatusBadge status={p.status} run={p.run_status} /></td>
+                    <td style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--ink-2)' }}>
+                      {fmtNum(p.rows_inserted_today)}
+                    </td>
+                    <td style={{ fontSize: 11, color: 'var(--ink-3)', fontFamily: '"JetBrains Mono", monospace' }}>
+                      {p.last_run_at ? new Date(p.last_run_at).toLocaleString() : '—'}
+                    </td>
+                    <td style={{
+                      fontSize: 11, color: 'var(--ink-3)',
+                      fontFamily: '"JetBrains Mono", monospace',
+                      maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>
+                      {p.clickhouse_database}.{p.clickhouse_table}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -263,12 +388,7 @@ export default function Dashboard() {
           )}
         </div>
       </div>
+
     </div>
   );
-}
-
-function StatusBadge({ status, run }) {
-  if (run === 'error') return <span className="px-2 py-0.5 rounded-full text-xs bg-red-900/40 text-red-400 border border-red-800">Error</span>;
-  if (status === 'active') return <span className="px-2 py-0.5 rounded-full text-xs bg-green-900/40 text-green-400 border border-green-800">Active</span>;
-  return <span className="px-2 py-0.5 rounded-full text-xs bg-slate-800 text-slate-400 border border-slate-700">Paused</span>;
 }

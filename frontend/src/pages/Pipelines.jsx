@@ -7,6 +7,7 @@ import {
   CheckCircle2, XCircle, Circle, HardDrive, TrendingUp, RefreshCw,
 } from 'lucide-react';
 import { api } from '../api';
+import { can } from '../lib/permissions';
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 
@@ -84,47 +85,26 @@ function fmtEta(remainingEvents, eps) {
 // ── Shared UI atoms ───────────────────────────────────────────────────────────
 
 function StatusDot({ status, run, isRunning }) {
-  // Stopping = pause was requested but the in-process loop hasn't fully exited yet
+  const dot = { width: 10, height: 10, borderRadius: '50%', flexShrink: 0, display: 'inline-block' };
   const stopping = isRunning && status === 'paused';
-  if (stopping) return <span className="w-2.5 h-2.5 rounded-full bg-amber-500 flex-shrink-0" />;
+  if (stopping) return <span style={{ ...dot, background: 'var(--butter)' }} />;
   if (isRunning) return (
-    <span className="relative flex w-2.5 h-2.5">
-      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-blue-500" />
+    <span style={{ position: 'relative', display: 'inline-flex', width: 10, height: 10, flexShrink: 0 }}>
+      <span style={{ position: 'absolute', inset: 0, borderRadius: '50%', background: 'var(--teal)', opacity: 0.45, animation: 'status-ping 1.2s cubic-bezier(0,0,0.2,1) infinite' }} />
+      <span style={{ ...dot, position: 'relative', background: 'var(--teal)' }} />
     </span>
   );
-  if (run === 'error') return <span className="w-2.5 h-2.5 rounded-full bg-red-500 flex-shrink-0" />;
-  if (status === 'active') return <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 flex-shrink-0" />;
-  return <span className="w-2.5 h-2.5 rounded-full bg-slate-600 flex-shrink-0" />;
+  if (run === 'error') return <span style={{ ...dot, background: 'var(--coral)' }} />;
+  if (status === 'active') return <span style={{ ...dot, background: 'var(--mint)' }} />;
+  return <span style={{ ...dot, background: 'var(--ink-2)' }} />;
 }
 
 function StatusBadge({ status, run, isRunning }) {
-  // Stopping = pause requested, loop still draining its current batch
-  if (isRunning && status === 'paused') return (
-    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-950 text-amber-400 border border-amber-800/60">
-      Stopping…
-    </span>
-  );
-  if (isRunning) return (
-    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-blue-950 text-blue-300 border border-blue-800/60">
-      Running
-    </span>
-  );
-  if (run === 'error') return (
-    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-950 text-red-400 border border-red-800/60">
-      <XCircle size={11} /> Error
-    </span>
-  );
-  if (status === 'active') return (
-    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-950 text-emerald-400 border border-emerald-800/60">
-      <CheckCircle2 size={11} /> Active
-    </span>
-  );
-  return (
-    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-800 text-slate-400 border border-slate-700">
-      <Circle size={11} /> Paused
-    </span>
-  );
+  if (isRunning && status === 'paused') return <span className="badge badge-stopping">Stopping…</span>;
+  if (isRunning) return <span className="badge badge-running">Running</span>;
+  if (run === 'error') return <span className="badge badge-error"><XCircle size={10} /> Error</span>;
+  if (status === 'active') return <span className="badge badge-active"><CheckCircle2 size={10} /> Active</span>;
+  return <span className="badge badge-paused">Paused</span>;
 }
 
 function IconBtn({ onClick, disabled, title, children, color = '' }) {
@@ -147,62 +127,55 @@ function ProgressBar({ value, max }) {
   if (!max) return null;
   const pct = Math.min(100, Math.round((value / max) * 100));
   return (
-    <div className="flex items-center gap-2">
-      <div className="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden">
-        <div className="h-full bg-brand-600 transition-all duration-500" style={{ width: `${pct}%` }} />
+    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+      <div className="progress-track" style={{ flex: 1 }}>
+        <div className="progress-fill" style={{ width: `${pct}%` }} />
       </div>
-      <span className="text-xs text-slate-500 tabular-nums w-8 text-right">{pct}%</span>
+      <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.35)', fontVariantNumeric: 'tabular-nums', minWidth: '32px', textAlign: 'right' }}>{pct}%</span>
     </div>
   );
 }
 
-// ── Metrics header bar ────────────────────────────────────────────────────────
+// ── Metrics header bar — Siphon style stat cards ─────────────────────────────
 
 function MetricsBar({ metrics, chUncompressedTotal }) {
   if (!metrics) return null;
-  const eps = metrics.ingestion?.last_60s?.events_per_sec ?? 0;
-  const eps5 = metrics.ingestion?.last_5s?.events_per_sec ?? 0;
-  const totalToday = metrics.pipelines?.rows_inserted_today ?? 0;
-  // rows_dlq_total = cumulative DLQ counter from pipeline_status (resets with Reset Stats)
-  // dlq.pending = actual rows in pipeline_dlq table waiting retry
-  const dlqPending = metrics.dlq?.pending ?? 0;
-  const dlqTotal = metrics.pipelines?.rows_dlq_total ?? 0;
-  const memMb = metrics.process?.rss_mb ?? 0;
+  const eps        = metrics.ingestion?.last_60s?.events_per_sec ?? 0;
+  const eps5       = metrics.ingestion?.last_5s?.events_per_sec  ?? 0;
+  const totalToday = metrics.pipelines?.rows_inserted_today      ?? 0;
+  const dlqPending = metrics.dlq?.pending                        ?? 0;
+  const memMb      = metrics.process?.rss_mb                     ?? 0;
+
+  const cards = [
+    { label: 'Events / sec', value: eps.toFixed(1), sub: eps5 > 0 ? `${eps5.toFixed(1)}/s (5s avg)` : 'last 60s', accent: eps5 > 0 ? 'var(--mint)' : undefined, tone: 'ink' },
+    { label: 'Rows today',   value: fmtNum(totalToday), sub: 'resets at midnight', tone: 'default' },
+    { label: 'ClickHouse',   value: fmtBytes(chUncompressedTotal ?? 0), sub: 'uncompressed', tone: 'butter' },
+    { label: 'DLQ pending',  value: fmtNum(dlqPending), accent: dlqPending > 0 ? 'var(--coral)' : undefined, sub: `${memMb.toFixed(0)} MB RSS`, tone: 'default' },
+  ];
+
+  const bgOf  = t => t === 'ink' ? 'var(--surface-ink)' : t === 'butter' ? 'var(--butter)' : t === 'mint' ? 'var(--surface-mint)' : 'var(--surface)';
+  const valOf = (t, a) => a || (t === 'ink' ? 'var(--canvas-text)' : 'var(--ink)');
+  const lblOf = t => t === 'ink' ? 'var(--canvas-dim)' : t === 'butter' ? 'rgba(26,24,20,0.55)' : 'var(--ink-3)';
+  const subOf = t => t === 'ink' ? 'var(--canvas-dim)' : t === 'butter' ? 'rgba(26,24,20,0.45)' : 'var(--ink-4)';
 
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
-      <div className="bg-slate-900 border border-slate-800 rounded-xl px-4 py-3">
-        <div className="flex items-center gap-2 mb-1">
-          <Activity size={13} className={eps5 > 0 ? 'text-emerald-400' : 'text-slate-600'} />
-          <span className="text-xs text-slate-500">Events / sec</span>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 32 }}>
+      {cards.map(({ label, value, accent, sub, tone }) => (
+        <div key={label} style={{
+          borderRadius: 20, padding: '20px 22px 18px',
+          background: bgOf(tone),
+          border: '1px solid var(--border-soft)',
+          boxShadow: 'var(--shadow-card)',
+        }}>
+          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.10em', textTransform: 'uppercase', color: lblOf(tone), marginBottom: 8 }}>
+            {label}
+          </div>
+          <div style={{ fontSize: 30, fontWeight: 800, letterSpacing: '-0.04em', lineHeight: 1, color: valOf(tone, accent), fontVariantNumeric: 'tabular-nums' }}>
+            {value}
+          </div>
+          {sub && <div style={{ fontSize: 11, color: subOf(tone), marginTop: 5 }}>{sub}</div>}
         </div>
-        <div className="text-xl font-bold text-white tabular-nums">{eps.toFixed(1)}</div>
-        {eps5 > 0 && <div className="text-xs text-emerald-400 mt-0.5">{eps5.toFixed(1)} right now</div>}
-      </div>
-      <div className="bg-slate-900 border border-slate-800 rounded-xl px-4 py-3">
-        <div className="flex items-center gap-2 mb-1">
-          <TrendingUp size={13} className="text-slate-500" />
-          <span className="text-xs text-slate-500">Rows today</span>
-        </div>
-        <div className="text-xl font-bold text-white tabular-nums">{fmtNum(totalToday)}</div>
-        <div className="text-xs text-slate-600 mt-0.5">resets at midnight</div>
-      </div>
-      <div className="bg-slate-900 border border-slate-800 rounded-xl px-4 py-3">
-        <div className="flex items-center gap-2 mb-1">
-          <HardDrive size={13} className="text-slate-500" />
-          <span className="text-xs text-slate-500">Data processed</span>
-        </div>
-        <div className="text-xl font-bold text-white tabular-nums">{fmtBytes(chUncompressedTotal ?? 0)}</div>
-        <div className="text-xs text-slate-600 mt-0.5">uncompressed in ClickHouse</div>
-      </div>
-      <div className={`bg-slate-900 border rounded-xl px-4 py-3 ${dlqPending > 0 ? 'border-amber-800/60' : 'border-slate-800'}`}>
-        <div className="flex items-center gap-2 mb-1">
-          <AlertTriangle size={13} className={dlqPending > 0 ? 'text-amber-400' : 'text-slate-600'} />
-          <span className="text-xs text-slate-500">DLQ pending retry</span>
-        </div>
-        <div className={`text-xl font-bold tabular-nums ${dlqPending > 0 ? 'text-amber-400' : 'text-white'}`}>{fmtNum(dlqPending)}</div>
-        <div className="text-xs text-slate-600 mt-0.5">{memMb.toFixed(0)} MB RSS</div>
-      </div>
+      ))}
     </div>
   );
 }
@@ -370,7 +343,7 @@ function RunHistory({ pipelineId, refreshKey, isRunning }) {
 
   if (!runs) return (
     <div className="text-xs text-slate-600 italic flex items-center gap-1.5">
-      <span className="w-3 h-3 border-2 border-slate-700 border-t-purple-500 rounded-full animate-spin" />
+      <span className="w-3 h-3 border-2 border-slate-700 border-t-teal-500 rounded-full animate-spin" />
       Loading…
     </div>
   );
@@ -471,7 +444,7 @@ function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRun
   const recon = reconcileResult?.[p.id];
 
   return (
-    <div className="border-t border-slate-800 bg-slate-900/40 px-6 py-4 space-y-4">
+    <div style={{ borderTop: '1px solid var(--border-soft)', background: 'var(--surface-alt)', padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
       {/* Checkpoint row */}
       <div>
         <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2.5 flex items-center gap-2">
@@ -607,7 +580,7 @@ function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRun
           <button
             onClick={() => setRunHistoryKey(k => k + 1)}
             title="Refresh run history"
-            className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-purple-300 transition-colors"
+            className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-teal-300 transition-colors"
           >
             <RefreshCw size={11} />
           </button>
@@ -638,10 +611,10 @@ function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRun
               onClick={() => onRunReconcile(healthWindow)}
               disabled={reconcilingId === p.id}
               title="Refresh now"
-              className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-purple-300 disabled:opacity-50 transition-colors"
+              className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-teal-300 disabled:opacity-50 transition-colors"
             >
               {reconcilingId === p.id ? (
-                <><span className="w-3 h-3 border-2 border-slate-600 border-t-purple-400 rounded-full animate-spin" /> Checking…</>
+                <><span className="w-3 h-3 border-2 border-slate-600 border-t-teal-400 rounded-full animate-spin" /> Checking…</>
               ) : (
                 <><RefreshCw size={11} /></>
               )}
@@ -650,7 +623,7 @@ function DetailPanel({ p, eps, partitions, reconcileResult, reconcilingId, onRun
         </div>
         {(!recon || recon.pending) && (
           <div className="text-xs text-slate-600 italic flex items-center gap-1.5">
-            <span className="w-3 h-3 border-2 border-slate-700 border-t-purple-500 rounded-full animate-spin" />
+            <span className="w-3 h-3 border-2 border-slate-700 border-t-teal-500 rounded-full animate-spin" />
             Checking source vs destination counts…
           </div>
         )}
@@ -761,13 +734,10 @@ function PipelineCard({
     api.getChStats(p.id).then(s => setChStats(s)).catch(() => {});
   }, [p.id, p.last_success_at]); // refetch when pipeline completes a run
 
+  const cardClass = `pipeline-card${p.is_running ? ' pipeline-card-running' : p.run_status === 'error' ? ' pipeline-card-error' : ''}`;
+
   return (
-    <div className={`bg-slate-900 border rounded-xl overflow-hidden transition-all ${
-      p.is_running ? 'border-blue-800/60'
-      : p.run_status === 'error' ? 'border-red-800/40'
-      : p.status === 'active' ? 'border-slate-700'
-      : 'border-slate-800'
-    }`}>
+    <div className={cardClass}>
       {/* Card header */}
       <div className="flex items-start gap-4 px-5 py-4">
         {/* Status dot + name */}
@@ -777,69 +747,58 @@ function PipelineCard({
 
         <div className="flex-1 min-w-0">
           {/* Row 1: name + badge */}
-          <div className="flex items-center gap-2.5 flex-wrap">
-            <span className="font-semibold text-white truncate">{p.name}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
             <StatusBadge status={p.status} run={p.run_status} isRunning={p.is_running} />
             {(p.rows_dlq ?? 0) > 0 && (
-              <span className="inline-flex items-center gap-1 text-xs text-amber-400 bg-amber-950/40 border border-amber-800/40 px-2 py-0.5 rounded-full" title="Historical DLQ counter — rows that failed to insert. Use Reset Stats to clear.">
-                <AlertTriangle size={10} /> {fmtNum(p.rows_dlq)} failed (historical)
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10, fontWeight: 600, color: '#a37600', background: 'rgba(245,212,72,0.18)', border: '1px solid rgba(163,118,0,0.22)', padding: '2px 8px', borderRadius: 999 }} title="Historical DLQ counter — rows that failed to insert. Use Reset Stats to clear.">
+                <AlertTriangle size={9} /> {fmtNum(p.rows_dlq)} failed
               </span>
             )}
           </div>
           {p.description && (
-            <div className="text-xs text-slate-500 mt-0.5 truncate">{p.description}</div>
+            <div style={{ fontSize: 12, color: 'var(--ink-2)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.description}</div>
           )}
 
           {/* Row 2: source → dest */}
           <div className="flex items-center gap-2 mt-2 text-xs flex-wrap">
-            <span className="flex items-center gap-1 bg-slate-800 px-2 py-1 rounded-md">
-              <Server size={10} className="text-slate-500" />
-              <span className="text-slate-400">{p.connection_name || '—'}</span>
-              <span className="text-slate-600 font-mono ml-1 truncate max-w-[140px]">{p.index_pattern}</span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'var(--canvas)', border: '1px solid var(--border)', borderRadius: 8, padding: '3px 8px' }}>
+              <Server size={10} style={{ color: 'var(--ink-3)' }} />
+              <span style={{ color: 'var(--ink-2)', fontSize: 11 }}>{p.connection_name || '—'}</span>
+              <span style={{ color: 'var(--ink-3)', fontFamily: '"JetBrains Mono", monospace', fontSize: 10, maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.index_pattern}</span>
             </span>
-            <ArrowRight size={11} className="text-slate-600 flex-shrink-0" />
-            <span className="flex items-center gap-1 bg-slate-800 px-2 py-1 rounded-md">
-              <Database size={10} className="text-slate-500" />
-              <span className="text-slate-400">{p.cluster_name || '—'}</span>
-              <span className="text-slate-600 font-mono ml-1">{p.clickhouse_database}.{p.clickhouse_table}</span>
+            <ArrowRight size={11} style={{ color: 'var(--ink-3)', flexShrink: 0 }} />
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'var(--canvas)', border: '1px solid var(--border)', borderRadius: 8, padding: '3px 8px' }}>
+              <Database size={10} style={{ color: 'var(--ink-3)' }} />
+              <span style={{ color: 'var(--ink-2)', fontSize: 11 }}>{p.cluster_name || '—'}</span>
+              <span style={{ color: 'var(--ink-3)', fontFamily: '"JetBrains Mono", monospace', fontSize: 10 }}>{p.clickhouse_database}.{p.clickhouse_table}</span>
             </span>
           </div>
         </div>
 
         {/* Stats block — CH Storage + Event Lag */}
-        <div className="hidden sm:flex items-center gap-5 flex-shrink-0 text-center">
-          <div>
-            <div className="text-xs text-slate-500 mb-0.5">Rows (CH)</div>
-            <div className="text-lg font-bold text-white tabular-nums">
-              {chStats ? fmtNum(chStats.rows) : <span className="text-slate-600 text-sm">—</span>}
-            </div>
-          </div>
-          <div className="w-px h-8 bg-slate-800" />
-          <div>
-            <div className="text-xs text-slate-500 mb-0.5">Uncompressed</div>
-            <div className="text-sm font-semibold text-slate-300 tabular-nums">
-              {chStats ? fmtBytes(chStats.uncompressed_bytes) : '—'}
-            </div>
-          </div>
-          <div className="w-px h-8 bg-slate-800" />
-          <div>
-            <div className="text-xs text-slate-500 mb-0.5">Compressed</div>
-            <div className="text-sm font-semibold text-emerald-400 tabular-nums">
-              {chStats ? fmtBytes(chStats.compressed_bytes) : '—'}
-            </div>
-          </div>
-          <div className="w-px h-8 bg-slate-800" />
-          <div title="How far behind real-time the newest processed event is">
-            <div className="text-xs text-slate-500 mb-0.5">Event Lag</div>
-            <div className={`text-sm font-semibold tabular-nums ${
-              p.event_lag_secs == null ? 'text-slate-600'
-              : p.event_lag_secs < 60 ? 'text-emerald-400'
-              : p.event_lag_secs < 3600 ? 'text-yellow-400'
-              : 'text-slate-400'
-            }`}>
-              {p.event_lag_secs != null ? fmtLag(p.event_lag_secs) : '—'}
-            </div>
-          </div>
+        <div style={{ display: 'none', alignItems: 'center', gap: 18, flexShrink: 0, textAlign: 'center' }} className="sm:flex">
+          {[
+            { label: 'Rows (CH)', value: chStats ? fmtNum(chStats.rows) : '—', color: 'var(--ink)' },
+            { label: 'Uncompressed', value: chStats ? fmtBytes(chStats.uncompressed_bytes) : '—', color: 'var(--ink-2)' },
+            { label: 'Compressed', value: chStats ? fmtBytes(chStats.compressed_bytes) : '—', color: 'var(--mint)' },
+            {
+              label: 'Event lag', title: 'How far behind real-time',
+              value: p.event_lag_secs != null ? fmtLag(p.event_lag_secs) : '—',
+              color: p.event_lag_secs == null ? 'var(--ink-3)'
+                : p.event_lag_secs < 60 ? 'var(--mint)'
+                : p.event_lag_secs < 3600 ? '#a37600'
+                : 'var(--ink-2)',
+            },
+          ].map(({ label, value, color, title }, i, arr) => (
+            <React.Fragment key={label}>
+              <div title={title}>
+                <div style={{ fontSize: 10, color: 'var(--ink-3)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}>{label}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color, fontVariantNumeric: 'tabular-nums' }}>{value}</div>
+              </div>
+              {i < arr.length - 1 && <div style={{ width: 1, height: 28, background: 'var(--border-soft)', flexShrink: 0 }} />}
+            </React.Fragment>
+          ))}
         </div>
 
         {/* Cursor + Last run */}
@@ -863,13 +822,17 @@ function PipelineCard({
 
         {/* Actions */}
         <div className="flex items-center gap-0.5 flex-shrink-0">
-          <IconBtn onClick={() => onTestRun(p)} disabled={acting[p.id]} title="Test run (no insert)">
-            <FlaskConical size={13} className="text-brand-400" />
-          </IconBtn>
-          <IconBtn onClick={() => onRunNow(p)} disabled={acting[p.id]} title="Run now (insert)">
-            <Zap size={13} className="text-yellow-400" />
-          </IconBtn>
-          {p.status === 'active' ? (
+          {can.operatePipeline() && (
+            <IconBtn onClick={() => onTestRun(p)} disabled={acting[p.id]} title="Test run (no insert)">
+              <FlaskConical size={13} className="text-brand-400" />
+            </IconBtn>
+          )}
+          {can.operatePipeline() && (
+            <IconBtn onClick={() => onRunNow(p)} disabled={acting[p.id]} title="Run now (insert)">
+              <Zap size={13} className="text-yellow-400" />
+            </IconBtn>
+          )}
+          {can.operatePipeline() && (p.status === 'active' ? (
             <IconBtn onClick={() => onAction(api.pausePipeline, p.id)} disabled={acting[p.id]} title="Pause">
               <Pause size={13} className="text-slate-300" />
             </IconBtn>
@@ -877,19 +840,27 @@ function PipelineCard({
             <IconBtn onClick={() => onAction(api.startPipeline, p.id)} disabled={acting[p.id]} title="Start">
               <Play size={13} className="text-emerald-400" />
             </IconBtn>
+          ))}
+          {can.operatePipeline() && (
+            <IconBtn onClick={() => onAction(() => api.resetCursor(p.id), p.id)} disabled={acting[p.id]} title="Reset cursor (re-pull from start)">
+              <RotateCcw size={13} className="text-slate-400" />
+            </IconBtn>
           )}
-          <IconBtn onClick={() => onAction(() => api.resetCursor(p.id), p.id)} disabled={acting[p.id]} title="Reset cursor (re-pull from start)">
-            <RotateCcw size={13} className="text-slate-400" />
-          </IconBtn>
-          <IconBtn onClick={() => onResetStats(p.id, p.name)} disabled={acting[p.id]} title="Reset stats (clear Today/Total/DLQ counters)">
-            <RefreshCw size={13} className="text-slate-500" />
-          </IconBtn>
-          <IconBtn onClick={() => navigate(`/pipelines/${p.id}/edit`)} title="Edit">
-            <Edit2 size={13} className="text-slate-400" />
-          </IconBtn>
-          <IconBtn onClick={() => onDel(p.id, p.name)} disabled={acting[p.id]} title="Delete">
-            <Trash2 size={13} className="text-red-400" />
-          </IconBtn>
+          {can.resetStats() && (
+            <IconBtn onClick={() => onResetStats(p.id, p.name)} disabled={acting[p.id]} title="Reset stats (clear Today/Total/DLQ counters)">
+              <RefreshCw size={13} className="text-slate-500" />
+            </IconBtn>
+          )}
+          {can.editPipeline() && (
+            <IconBtn onClick={() => navigate(`/pipelines/${p.id}/edit`)} title="Edit">
+              <Edit2 size={13} className="text-slate-400" />
+            </IconBtn>
+          )}
+          {can.deletePipeline() && (
+            <IconBtn onClick={() => onDel(p.id, p.name)} disabled={acting[p.id]} title="Delete">
+              <Trash2 size={13} className="text-red-400" />
+            </IconBtn>
+          )}
           <div className="w-px h-5 bg-slate-800 mx-0.5" />
           <IconBtn onClick={() => onToggleExpand(p.id)} title={isExpanded ? 'Collapse details' : 'Expand details'}>
             {isExpanded ? <ChevronUp size={13} className="text-slate-400" /> : <ChevronDown size={13} className="text-slate-400" />}
@@ -1138,23 +1109,25 @@ export default function Pipelines() {
   const erroring = list.filter(p => p.run_status === 'error').length;
 
   return (
-    <div className="p-6">
+    <div style={{ padding: '40px 48px 64px', maxWidth: 1200, margin: '0 auto' }}>
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 32 }}>
         <div>
-          <h1 className="text-xl font-bold text-white">Pipelines</h1>
-          <p className="text-sm text-slate-400 mt-0.5">
-            {list.length} total
-            {active > 0 && <span className="ml-2 text-emerald-400">{active} active</span>}
-            {erroring > 0 && <span className="ml-2 text-red-400">{erroring} erroring</span>}
-          </p>
+          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--ink-3)', marginBottom: 6 }}>Workspace</div>
+          <h1 style={{ fontSize: 30, fontWeight: 800, letterSpacing: '-0.03em', lineHeight: 1, color: 'var(--ink)', margin: 0 }}>
+            Pipelines
+          </h1>
+          <div style={{ fontSize: 13, color: 'var(--ink-3)', marginTop: 6, display: 'flex', gap: 12 }}>
+            <span>{list.length} total</span>
+            {active   > 0 && <span style={{ color: 'var(--mint)', fontWeight: 500 }}>{active} active</span>}
+            {erroring > 0 && <span style={{ color: 'var(--coral)', fontWeight: 500 }}>{erroring} erroring</span>}
+          </div>
         </div>
-        <button
-          onClick={() => navigate('/pipelines/new')}
-          className="flex items-center gap-2 bg-brand-600 hover:bg-brand-500 text-white text-sm px-4 py-2 rounded-lg transition-colors"
-        >
-          <Plus size={15} /> New Pipeline
-        </button>
+        {can.createPipeline() && (
+          <button onClick={() => navigate('/pipelines/new')} className="btn-primary">
+            <Plus size={13} /> New pipeline
+          </button>
+        )}
       </div>
 
       {/* Metrics cards */}
@@ -1162,50 +1135,79 @@ export default function Pipelines() {
 
       {/* Run result banner */}
       {result && (
-        <div className={`mb-5 rounded-xl border px-4 py-3 ${
-          result.ok === null ? 'bg-slate-800 border-slate-700'
-          : result.ok ? 'bg-emerald-950/30 border-emerald-800/60'
-          : 'bg-red-950/30 border-red-800/60'
-        }`}>
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <div className="text-sm font-medium text-white">{result.pipeline}</div>
-              <div className={`text-xs mt-0.5 ${result.ok === false ? 'text-red-400' : 'text-slate-300'}`}>{result.msg}</div>
+        <div style={{
+          marginBottom: '16px', borderRadius: '14px',
+          padding: '14px 16px',
+          background: result.ok === null ? 'rgba(255,255,255,0.04)'
+            : result.ok ? 'rgba(52,211,153,0.07)'
+            : 'rgba(239,68,68,0.07)',
+          border: `1px solid ${result.ok === null ? 'rgba(255,255,255,0.08)'
+            : result.ok ? 'rgba(52,211,153,0.18)'
+            : 'rgba(239,68,68,0.18)'}`,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '16px' }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ color: 'rgba(255,255,255,0.80)', fontSize: '13px', fontWeight: 600 }}>{result.pipeline}</div>
+              <div style={{ color: result.ok === false ? '#f87171' : 'rgba(255,255,255,0.50)', fontSize: '12px', marginTop: '3px' }}>{result.msg}</div>
               {result.sample && (
-                <pre className="mt-2 text-xs bg-slate-950 border border-slate-800 rounded-lg p-3 overflow-x-auto text-slate-300 max-h-64">{result.sample}</pre>
+                <pre style={{
+                  marginTop: '10px', fontSize: '11px', fontFamily: '"JetBrains Mono", monospace',
+                  background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.06)',
+                  borderRadius: '10px', padding: '12px', overflowX: 'auto',
+                  color: 'rgba(255,255,255,0.55)', maxHeight: '200px',
+                }}>{result.sample}</pre>
               )}
             </div>
-            <button onClick={() => setResult(null)} className="icon-btn flex-shrink-0"><X size={14} /></button>
+            <button onClick={() => setResult(null)} className="icon-btn" style={{ flexShrink: 0 }}><X size={13} /></button>
           </div>
         </div>
       )}
 
       {/* Filters */}
-      <div className="flex gap-3 mb-5">
-        <div className="relative flex-1 max-w-xs">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+      <div style={{ display: 'flex', gap: 10, marginBottom: 20, alignItems: 'center' }}>
+        <div style={{ position: 'relative', flex: 1, maxWidth: 340 }}>
+          <Search size={13} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: 'var(--ink-3)', pointerEvents: 'none' }} />
           <input
-            className="input w-full pl-9 text-sm"
+            className="input"
+            style={{ paddingLeft: 38, borderRadius: 999 }}
             placeholder="Search pipelines…"
             value={search}
             onChange={e => setSearch(e.target.value)}
           />
         </div>
-        <select className="input text-sm" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
-          <option value="">All statuses</option>
-          <option value="active">Active</option>
-          <option value="paused">Paused</option>
-        </select>
+        {['', 'active', 'paused'].map(v => (
+          <button
+            key={v || 'all'}
+            className={`filter-pill${statusFilter === v ? ' filter-pill-active' : ''}`}
+            onClick={() => setStatusFilter(v)}
+          >
+            {v === '' ? 'All' : v === 'active' ? 'Active' : 'Paused'}
+          </button>
+        ))}
       </div>
 
       {/* Pipeline cards */}
       {list.length === 0 ? (
-        <div className="text-center py-20 text-slate-500 text-sm bg-slate-900 border border-slate-800 rounded-xl">
+        <div style={{
+          textAlign: 'center', padding: '72px 24px',
+          borderRadius: 20,
+          background: 'var(--surface)',
+          border: '1px dashed var(--border)',
+          color: 'var(--ink-3)', fontSize: 13,
+          boxShadow: 'var(--shadow-card)',
+        }}>
           No pipelines.{' '}
-          <button onClick={() => navigate('/pipelines/new')} className="text-brand-400 hover:underline">Create one →</button>
+          {can.createPipeline() && (
+            <button
+              onClick={() => navigate('/pipelines/new')}
+              style={{ color: 'var(--coral)', background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit', fontWeight: 600 }}
+            >
+              Create one →
+            </button>
+          )}
         </div>
       ) : (
-        <div className="space-y-3">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
           {list.map(p => (
             <PipelineCard
               key={p.id}

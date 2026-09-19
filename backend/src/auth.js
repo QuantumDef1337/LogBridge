@@ -23,4 +23,18 @@ function requireAuth(req, res, next) {
   }
 }
 
-module.exports = { signToken, verifyToken, requireAuth };
+const ROLE_WEIGHT = { super_admin: 4, admin: 3, analyst: 2, viewer: 1 };
+
+function requireAdmin(req, res, next) {
+  const w = ROLE_WEIGHT[req.user?.role] ?? 1;
+  if (w < 3) return res.status(403).json({ error: 'Admin access required' });
+  next();
+}
+
+function requireAnalyst(req, res, next) {
+  const w = ROLE_WEIGHT[req.user?.role] ?? 1;
+  if (w < 2) return res.status(403).json({ error: 'Analyst access required' });
+  next();
+}
+
+module.exports = { signToken, verifyToken, requireAuth, requireAdmin, requireAnalyst };

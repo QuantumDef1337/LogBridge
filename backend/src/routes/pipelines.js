@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const { getDb } = require('../db');
-const { requireAuth } = require('../auth');
+const { requireAuth, requireAdmin, requireAnalyst } = require('../auth');
 const scheduler = require('../scheduler');
 const { decryptRow } = require('../crypto');
 const audit = require('../audit');
@@ -58,7 +58,7 @@ router.get('/:id', (req, res) => {
   res.json(parsePipeline(row));
 });
 
-router.post('/', (req, res) => {
+router.post('/', requireAdmin, (req, res) => {
   const db = getDb();
   const p = req.body;
   if (!p.name) return res.status(400).json({ error: 'name required' });
@@ -98,7 +98,7 @@ router.post('/', (req, res) => {
   res.json({ id: r.lastInsertRowid });
 });
 
-router.put('/:id', (req, res) => {
+router.put('/:id', requireAdmin, (req, res) => {
   const db = getDb();
   const existing = db.prepare('SELECT * FROM pipelines WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Not found' });
@@ -137,14 +137,14 @@ router.put('/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', requireAdmin, (req, res) => {
   const row = getDb().prepare('SELECT name FROM pipelines WHERE id = ?').get(req.params.id);
   getDb().prepare('DELETE FROM pipelines WHERE id = ?').run(req.params.id);
   audit.warn('pipeline', `Pipeline deleted: "${row?.name || req.params.id}"`);
   res.json({ ok: true });
 });
 
-router.post('/:id/start', (req, res) => {
+router.post('/:id/start', requireAnalyst, (req, res) => {
   const db = getDb();
   const row = db.prepare('SELECT name FROM pipelines WHERE id=?').get(req.params.id);
   db.prepare("UPDATE pipelines SET status='active', updated_at=datetime('now') WHERE id=?").run(req.params.id);
@@ -154,7 +154,7 @@ router.post('/:id/start', (req, res) => {
   res.json({ ok: true });
 });
 
-router.post('/:id/pause', (req, res) => {
+router.post('/:id/pause', requireAnalyst, (req, res) => {
   const db = getDb();
   const row = db.prepare('SELECT name FROM pipelines WHERE id=?').get(req.params.id);
   db.prepare("UPDATE pipelines SET status='paused', updated_at=datetime('now') WHERE id=?").run(req.params.id);
@@ -164,7 +164,7 @@ router.post('/:id/pause', (req, res) => {
   res.json({ ok: true });
 });
 
-router.post('/:id/reset-cursor', (req, res) => {
+router.post('/:id/reset-cursor', requireAnalyst, (req, res) => {
   const row = getDb().prepare('SELECT name FROM pipelines WHERE id=?').get(req.params.id);
   getDb().prepare('UPDATE pipeline_status SET cursor_timestamp=NULL, cursor_id=NULL WHERE pipeline_id=?').run(req.params.id);
   // Also reset per-index cursors if any
@@ -187,7 +187,7 @@ router.get('/:id/progress', (req, res) => {
 });
 
 // Reset row counters for a pipeline (Today + Total + Week)
-router.post('/:id/reset-stats', (req, res) => {
+router.post('/:id/reset-stats', requireAdmin, (req, res) => {
   const row = getDb().prepare('SELECT name FROM pipelines WHERE id=?').get(req.params.id);
   getDb().prepare(
     'UPDATE pipeline_status SET rows_inserted_total=0, rows_inserted_today=0, rows_inserted_week=0, rows_dlq=0 WHERE pipeline_id=?'
@@ -204,9 +204,11 @@ router.get('/stats/summary', (req, res) => {
   const paused = db.prepare("SELECT COUNT(*) as c FROM pipelines WHERE status='paused'").get().c;
   const erroring = db.prepare("SELECT COUNT(*) as c FROM pipeline_status WHERE status='error'").get().c;
   const rows_today = db.prepare('SELECT COALESCE(SUM(rows_inserted_today),0) as t FROM pipeline_status').get().t;
+  const rows_week  = db.prepare('SELECT COALESCE(SUM(rows_inserted_week),0) as t FROM pipeline_status').get().t;
   const rows_total = db.prepare('SELECT COALESCE(SUM(rows_inserted_total),0) as t FROM pipeline_status').get().t;
   const bytes = db.prepare('SELECT COALESCE(SUM(bytes_processed),0) as t FROM pipeline_status').get().t;
-  res.json({ total, active, paused, erroring, rows_today, rows_total, bytes_processed: bytes });
+  const dlq_pending = db.prepare("SELECT COALESCE(COUNT(*),0) as t FROM pipeline_dlq WHERE status='pending'").get().t;
+  res.json({ total, active, paused, erroring, rows_today, rows_week, rows_total, bytes_processed: bytes, dlq_pending });
 });
 
 // ─── Test / Run-now endpoints ────────────────────────────────────────────────
@@ -224,7 +226,7 @@ function loadRunContext(pipelineId) {
 }
 
 // Dry run: pull one page, transform, return sample rows WITHOUT inserting.
-router.post('/:id/test-run', async (req, res) => {
+router.post('/:id/test-run', requireAnalyst, async (req, res) => {
   const ctx = loadRunContext(req.params.id);
   if (!ctx) return res.status(404).json({ error: 'Pipeline not found' });
   if (!ctx.conn) return res.status(400).json({ error: 'No OpenSearch connection configured' });
@@ -238,7 +240,7 @@ router.post('/:id/test-run', async (req, res) => {
 
 // Run now: pull from cursor (respecting pull mode / time range), transform, insert.
 // Respects the scheduler execution lock — returns 409 if this pipeline is already running.
-router.post('/:id/run-now', async (req, res) => {
+router.post('/:id/run-now', requireAnalyst, async (req, res) => {
   const pipelineId = req.params.id;
 
   // Execution lock: never run a pipeline concurrently with itself
@@ -515,7 +517,7 @@ router.get('/:id/dlq/:dlqId', (req, res) => {
 });
 
 // Retry DLQ items: re-transform and re-insert the stored documents.
-router.post('/:id/dlq/retry', async (req, res) => {
+router.post('/:id/dlq/retry', requireAnalyst, async (req, res) => {
   const ctx = loadRunContext(req.params.id);
   if (!ctx || !ctx.cluster) return res.status(400).json({ error: 'Pipeline/cluster not configured' });
   const db = getDb();
@@ -539,12 +541,12 @@ router.post('/:id/dlq/retry', async (req, res) => {
   res.json({ ok: true, retried: items.length, recovered, stillFailing });
 });
 
-router.delete('/:id/dlq', (req, res) => {
+router.delete('/:id/dlq', requireAnalyst, (req, res) => {
   getDb().prepare('DELETE FROM pipeline_dlq WHERE pipeline_id = ?').run(req.params.id);
   res.json({ ok: true });
 });
 
-router.delete('/:id/dlq/:dlqId', (req, res) => {
+router.delete('/:id/dlq/:dlqId', requireAnalyst, (req, res) => {
   getDb().prepare('DELETE FROM pipeline_dlq WHERE id = ? AND pipeline_id = ?').run(req.params.dlqId, req.params.id);
   res.json({ ok: true });
 });

@@ -26,8 +26,22 @@ async function req(method, path, body) {
 
 export const api = {
   // Auth
-  login: (username, password) => req('POST', '/auth/login', { username, password }),
+  login: (username, password, mfa_token) => req('POST', '/auth/login', { username, password, ...(mfa_token ? { mfa_token } : {}) }),
   changePassword: (current_password, new_password) => req('POST', '/auth/change-password', { current_password, new_password }),
+
+  // Users & Settings
+  getUsers: () => req('GET', '/users'),
+  createUser: (data) => req('POST', '/users', data),
+  updateUser: (id, data) => req('PUT', `/users/${id}`, data),
+  deleteUser: (id) => req('DELETE', `/users/${id}`),
+  getMyProfile: () => req('GET', '/users/me'),
+  updateMyProfile: (data) => req('PUT', '/users/me/profile', data),
+  setupMfa: (id) => req('POST', `/users/${id}/mfa/setup`),
+  verifyMfa: (id, token) => req('POST', `/users/${id}/mfa/verify`, { token }),
+  disableMfa: (id) => req('POST', `/users/${id}/mfa/disable`),
+  getSecuritySettings: () => req('GET', '/users/settings/security'),
+  updateSecuritySettings: (data) => req('PUT', '/users/settings/security', data),
+  getLoginActivity: (limit = 100) => req('GET', `/users/activity/logins?limit=${limit}`),
 
   // OpenSearch connections
   getConnections: () => req('GET', '/connections'),

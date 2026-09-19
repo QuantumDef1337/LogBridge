@@ -5,10 +5,10 @@ import { fmtTs, getTzPref, setTzPref } from '../utils/time';
 
 function TzToggle({ pref, onChange }) {
   return (
-    <div className="flex items-center gap-1 bg-slate-800 border border-slate-700 rounded-lg p-0.5">
+    <div style={{ display: 'flex', gap: 2, border: '1px solid var(--border)', borderRadius: 8, padding: 2, background: 'var(--surface)' }}>
       {['local', 'utc'].map(v => (
         <button key={v} onClick={() => onChange(v)}
-          className={`px-3 py-1 rounded text-xs font-medium transition-colors ${pref === v ? 'bg-brand-600 text-white' : 'text-slate-400 hover:text-white'}`}>
+          style={{ padding: '4px 12px', borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: 'pointer', border: pref === v ? '1px solid rgba(20,184,166,0.40)' : '1px solid transparent', background: pref === v ? 'var(--teal-tint)' : 'transparent', color: pref === v ? 'var(--teal)' : 'var(--ink-3)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
           {v === 'utc' ? 'UTC' : 'Local'}
         </button>
       ))}
@@ -17,15 +17,15 @@ function TzToggle({ pref, onChange }) {
 }
 
 const LEVEL_COLORS = {
-  error: 'text-red-400 bg-red-950/30',
-  warn:  'text-amber-400 bg-amber-950/20',
-  info:  'text-slate-300',
+  error: { background: 'rgba(232,80,58,0.06)' },
+  warn:  { background: 'rgba(245,212,72,0.08)' },
+  info:  {},
 };
 
 const LEVEL_BADGE = {
-  error: 'bg-red-900/60 text-red-300 border border-red-800',
-  warn:  'bg-amber-900/40 text-amber-300 border border-amber-800',
-  info:  'bg-slate-800 text-slate-400 border border-slate-700',
+  error: { background: 'var(--coral-tint)', color: 'var(--coral)', border: '1px solid rgba(232,80,58,0.30)' },
+  warn:  { background: 'rgba(245,212,72,0.18)', color: '#a37600', border: '1px solid rgba(163,118,0,0.25)' },
+  info:  { background: 'var(--surface-alt)', color: 'var(--ink-3)', border: '1px solid var(--border)' },
 };
 
 function parseBatchInsert(body) {
@@ -50,28 +50,30 @@ function LogRow({ entry, tz }) {
   return (
     <>
       <tr
-        className={`border-b border-slate-800/60 hover:bg-slate-800/20 cursor-pointer transition-colors ${entry.level === 'error' ? 'bg-red-950/10' : entry.level === 'warn' ? 'bg-amber-950/10' : ''}`}
+        style={{ borderBottom: '1px solid var(--border-soft)', cursor: hasDetail ? 'pointer' : 'default', transition: 'background 150ms', ...(LEVEL_COLORS[entry.level] || {}) }}
         onClick={() => hasDetail && setExpanded(e => !e)}
+        onMouseEnter={e => e.currentTarget.style.background = 'var(--surface-alt)'}
+        onMouseLeave={e => e.currentTarget.style.background = (LEVEL_COLORS[entry.level] || {}).background || 'transparent'}
       >
-        <td className="px-4 py-2 text-xs font-mono text-slate-500 whitespace-nowrap w-44">{fmtTs(entry.created_at, tz)}</td>
-        <td className="px-3 py-2 w-32">
-          <span className="text-xs font-medium text-brand-400 truncate block max-w-[120px]" title={entry.pipeline_name}>{entry.pipeline_name}</span>
+        <td style={{ padding: '6px 16px', fontSize: 11, fontFamily: '"JetBrains Mono", monospace', color: 'var(--ink-3)', whiteSpace: 'nowrap', width: 176 }}>{fmtTs(entry.created_at, tz)}</td>
+        <td style={{ padding: '6px 12px', width: 128 }}>
+          <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--teal)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', maxWidth: 120 }} title={entry.pipeline_name}>{entry.pipeline_name}</span>
         </td>
-        <td className="px-3 py-2 w-16">
-          <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${LEVEL_BADGE[entry.level] || LEVEL_BADGE.info}`}>{entry.level}</span>
+        <td style={{ padding: '6px 12px', width: 64 }}>
+          <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 6, ...(LEVEL_BADGE[entry.level] || LEVEL_BADGE.info) }}>{entry.level}</span>
         </td>
-        <td className="px-3 py-2 text-xs font-mono text-slate-300 max-w-0">
-          <div className="truncate">{entry.message}</div>
+        <td style={{ padding: '6px 12px', fontSize: 11, fontFamily: '"JetBrains Mono", monospace', color: 'var(--ink-2)', maxWidth: 0 }}>
+          <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.message}</div>
         </td>
       </tr>
       {expanded && hasDetail && (
-        <tr className="bg-slate-900/60 border-b border-slate-800/40">
-          <td colSpan={4} className="px-8 py-2">
-            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-mono text-slate-400">
-              {batch.index && <span>index: <span className="text-yellow-400">{batch.index}</span></span>}
-              {batch.fromTs && <span>from: <span className="text-blue-300">{fmtTs(batch.fromTs, tz)}</span></span>}
-              {batch.toTs && <span>to: <span className="text-blue-300">{fmtTs(batch.toTs, tz)}</span></span>}
-              {batch.inserted && <span>inserted: <span className="text-emerald-400">{batch.inserted.toLocaleString()}</span></span>}
+        <tr style={{ background: 'var(--surface-alt)', borderBottom: '1px solid var(--border-soft)' }}>
+          <td colSpan={4} style={{ padding: '8px 32px' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 16px', fontSize: 11, fontFamily: '"JetBrains Mono", monospace', color: 'var(--ink-3)' }}>
+              {batch.index && <span>index: <span style={{ color: '#a37600' }}>{batch.index}</span></span>}
+              {batch.fromTs && <span>from: <span style={{ color: 'var(--sky)' }}>{fmtTs(batch.fromTs, tz)}</span></span>}
+              {batch.toTs && <span>to: <span style={{ color: 'var(--sky)' }}>{fmtTs(batch.toTs, tz)}</span></span>}
+              {batch.inserted && <span>inserted: <span style={{ color: 'var(--mint)', fontWeight: 600 }}>{batch.inserted.toLocaleString()}</span></span>}
             </div>
           </td>
         </tr>
@@ -120,47 +122,41 @@ function RunHistoryTab({ tz }) {
   return (
     <div className="space-y-4">
       {/* Filter bar */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex items-center gap-3 flex-wrap">
+      <div style={{ border: '1px solid var(--border)', borderRadius: 12, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', background: 'var(--surface)', marginBottom: 12 }}>
         <Filter size={13} className="text-slate-500" />
-        <select value={pipelineId} onChange={e => setPipelineId(e.target.value)} className="input text-xs h-8">
+        <select value={pipelineId} onChange={e => setPipelineId(e.target.value)} className="input" style={{ fontSize: 12, height: 32, width: 220, flexShrink: 0 }}>
           <option value="">All pipelines</option>
           {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
         </select>
         <button onClick={() => load(1)} disabled={loading}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-700 transition-colors disabled:opacity-40 ml-auto">
+          className="btn-ghost" style={{ fontSize: 11, gap: 6, marginLeft: 'auto', opacity: loading ? 0.4 : 1 }}>
           <RefreshCw size={12} className={loading ? 'animate-spin' : ''} /> Refresh
         </button>
-        <span className="text-xs text-slate-500">{total.toLocaleString()} total runs</span>
+        <span style={{ fontSize: 11, color: 'var(--ink-3)' }}>{total.toLocaleString()} total runs</span>
       </div>
 
       {/* Table */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-        <div className="px-4 py-2.5 border-b border-slate-800 flex items-center justify-between">
-          <span className="text-xs text-slate-500">
+      <div className="card-shell" style={{ overflow: 'hidden' }}>
+        <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border-soft)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span style={{ fontSize: 11, color: 'var(--ink-3)' }}>
             {total > 0 ? `Showing ${((page-1)*limit+1).toLocaleString()}–${Math.min(page*limit,total).toLocaleString()} of ${total.toLocaleString()}` : 'No runs'}
           </span>
-          <div className="flex items-center gap-1">
-            <button onClick={() => goPage(1)} disabled={page<=1||loading} className="px-2 py-1 rounded text-xs text-slate-400 hover:text-white disabled:opacity-30">«</button>
-            <button onClick={() => goPage(page-1)} disabled={page<=1||loading} className="p-1 rounded text-slate-400 hover:text-white disabled:opacity-30"><ChevronLeft size={14}/></button>
-            <span className="text-xs text-slate-400 px-2">Page {page} of {pages}</span>
-            <button onClick={() => goPage(page+1)} disabled={page>=pages||loading} className="p-1 rounded text-slate-400 hover:text-white disabled:opacity-30"><ChevronRight size={14}/></button>
-            <button onClick={() => goPage(pages)} disabled={page>=pages||loading} className="px-2 py-1 rounded text-xs text-slate-400 hover:text-white disabled:opacity-30">»</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <button onClick={() => goPage(1)} disabled={page<=1||loading} className="btn-ghost" style={{ padding: '4px 8px', fontSize: 11, opacity: page<=1||loading ? 0.3 : 1 }}>«</button>
+            <button onClick={() => goPage(page-1)} disabled={page<=1||loading} className="btn-ghost" style={{ padding: '4px 6px', opacity: page<=1||loading ? 0.3 : 1 }}><ChevronLeft size={13}/></button>
+            <span style={{ fontSize: 11, color: 'var(--ink-3)', padding: '0 8px' }}>Page {page} of {pages}</span>
+            <button onClick={() => goPage(page+1)} disabled={page>=pages||loading} className="btn-ghost" style={{ padding: '4px 6px', opacity: page>=pages||loading ? 0.3 : 1 }}><ChevronRight size={13}/></button>
+            <button onClick={() => goPage(pages)} disabled={page>=pages||loading} className="btn-ghost" style={{ padding: '4px 8px', fontSize: 11, opacity: page>=pages||loading ? 0.3 : 1 }}>»</button>
           </div>
         </div>
 
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-slate-800 bg-slate-800/30">
-                <th className="px-4 py-2 text-left text-xs font-medium text-slate-500">Started</th>
-                <th className="px-3 py-2 text-left text-xs font-medium text-slate-500">Pipeline</th>
-                <th className="px-3 py-2 text-left text-xs font-medium text-slate-500">Window</th>
-                <th className="px-3 py-2 text-right text-xs font-medium text-slate-500">Fetched</th>
-                <th className="px-3 py-2 text-right text-xs font-medium text-slate-500">Inserted</th>
-                <th className="px-3 py-2 text-right text-xs font-medium text-slate-500">Dedup</th>
-                <th className="px-3 py-2 text-right text-xs font-medium text-slate-500">Coverage</th>
-                <th className="px-3 py-2 text-right text-xs font-medium text-slate-500">Duration</th>
-                <th className="px-3 py-2 text-center text-xs font-medium text-slate-500">Status</th>
+              <tr style={{ borderBottom: '1px solid var(--border)', background: 'var(--surface-alt)' }}>
+                {['Started','Pipeline','Window','Fetched','Inserted','Dedup','Coverage','Duration','Status'].map((h,i) => (
+                  <th key={h} style={{ padding: '8px 12px', textAlign: i >= 3 ? (i === 8 ? 'center' : 'right') : 'left', fontSize: 10, fontWeight: 700, color: 'var(--ink-3)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>{h}</th>
+                ))}
               </tr>
             </thead>
             <tbody>
@@ -170,72 +166,74 @@ function RunHistoryTab({ tz }) {
                 <tr><td colSpan={9} className="text-center py-12 text-slate-500 text-sm">No run history yet. Runs appear here after the pipeline executes.</td></tr>
               ) : runs.map(run => {
                 const isExpanded = expanded[run.id];
-                const statusColor = run.status === 'complete' ? 'text-emerald-400'
-                  : run.status === 'failed' ? 'text-red-400'
-                  : run.status === 'cancelled' ? 'text-amber-400'
-                  : 'text-slate-400';
+                const statusColor = run.status === 'complete' ? 'var(--mint)'
+                  : run.status === 'failed' ? 'var(--coral)'
+                  : run.status === 'cancelled' ? '#a37600'
+                  : 'var(--ink-3)';
                 const pct = run.success_pct;
-                const coverageColor = pct === 100 ? 'text-emerald-400'
-                  : pct != null && pct >= 95 ? 'text-amber-400' : pct != null ? 'text-red-400' : 'text-slate-500';
+                const coverageColor = pct === 100 ? 'var(--mint)'
+                  : pct != null && pct >= 95 ? '#a37600' : pct != null ? 'var(--coral)' : 'var(--ink-3)';
                 const dur = fmtDurSecs(run.started_at, run.finished_at);
                 return (
                   <React.Fragment key={run.id}>
                     <tr
-                      className="border-b border-slate-800/60 hover:bg-slate-800/20 cursor-pointer transition-colors"
+                      style={{ borderBottom: '1px solid var(--border-soft)', cursor: 'pointer', transition: 'background 150ms' }}
                       onClick={() => setExpanded(e => ({ ...e, [run.id]: !e[run.id] }))}
+                      onMouseEnter={e => e.currentTarget.style.background = 'var(--surface-alt)'}
+                      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
                     >
-                      <td className="px-4 py-2 text-xs font-mono text-slate-400 whitespace-nowrap">{fmtTs(run.started_at, tz)}</td>
-                      <td className="px-3 py-2 text-xs font-medium text-brand-400 truncate max-w-[120px]">{run.pipeline_name}</td>
-                      <td className="px-3 py-2 text-[10px] font-mono text-slate-600 whitespace-nowrap">
+                      <td style={{ padding: '7px 16px', fontSize: 11, fontFamily: '"JetBrains Mono", monospace', color: 'var(--ink-3)', whiteSpace: 'nowrap' }}>{fmtTs(run.started_at, tz)}</td>
+                      <td style={{ padding: '7px 12px', fontSize: 11, fontWeight: 600, color: 'var(--teal)', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 120 }}>{run.pipeline_name}</td>
+                      <td style={{ padding: '7px 12px', fontSize: 10, fontFamily: '"JetBrains Mono", monospace', color: 'var(--ink-4)', whiteSpace: 'nowrap' }}>
                         {run.from_ts ? fmtTs(run.from_ts, tz) : '—'} → {run.to_ts ? fmtTs(run.to_ts, tz) : '—'}
                       </td>
-                      <td className="px-3 py-2 text-xs text-right text-slate-400">{(run.fetched ?? 0).toLocaleString()}</td>
-                      <td className="px-3 py-2 text-xs text-right text-white font-medium">{(run.inserted ?? 0).toLocaleString()}</td>
-                      <td className="px-3 py-2 text-xs text-right text-slate-500">{run.skipped > 0 ? run.skipped.toLocaleString() : '—'}</td>
-                      <td className={`px-3 py-2 text-xs text-right font-medium ${coverageColor}`}>
+                      <td style={{ padding: '7px 12px', fontSize: 11, textAlign: 'right', color: 'var(--ink-3)' }}>{(run.fetched ?? 0).toLocaleString()}</td>
+                      <td style={{ padding: '7px 12px', fontSize: 11, textAlign: 'right', color: 'var(--ink)', fontWeight: 600 }}>{(run.inserted ?? 0).toLocaleString()}</td>
+                      <td style={{ padding: '7px 12px', fontSize: 11, textAlign: 'right', color: 'var(--ink-3)' }}>{run.skipped > 0 ? run.skipped.toLocaleString() : '—'}</td>
+                      <td style={{ padding: '7px 12px', fontSize: 11, textAlign: 'right', fontWeight: 600, color: coverageColor }}>
                         {pct != null ? `${pct}%` : run.source_count == null ? '—' : 'pending'}
                       </td>
-                      <td className="px-3 py-2 text-xs text-right text-slate-500">{dur ?? '—'}</td>
-                      <td className={`px-3 py-2 text-xs text-center font-semibold ${statusColor}`}>
-                        {run.status === 'complete' ? '✓ COMPLETE' : run.status === 'failed' ? '✗ FAILED' : run.status?.toUpperCase()}
+                      <td style={{ padding: '7px 12px', fontSize: 11, textAlign: 'right', color: 'var(--ink-3)' }}>{dur ?? '—'}</td>
+                      <td style={{ padding: '7px 12px', fontSize: 11, textAlign: 'center', fontWeight: 700, color: statusColor }}>
+                        {run.status === 'complete' ? '✓ OK' : run.status === 'failed' ? '✗ FAIL' : run.status?.toUpperCase()}
                       </td>
                     </tr>
                     {isExpanded && (
-                      <tr className="bg-slate-900/60 border-b border-slate-800/40">
-                        <td colSpan={9} className="px-8 py-3">
-                          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-[11px]">
+                      <tr style={{ background: 'var(--surface-alt)', borderBottom: '1px solid var(--border-soft)' }}>
+                        <td colSpan={9} style={{ padding: '12px 32px' }}>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, fontSize: 11 }}>
                             <div>
-                              <div className="text-slate-500 mb-1">Run window</div>
-                              <div className="font-mono text-slate-300">{run.from_ts ? fmtTs(run.from_ts, tz) : '—'}</div>
-                              <div className="font-mono text-slate-300">→ {run.to_ts ? fmtTs(run.to_ts, tz) : '—'}</div>
+                              <div style={{ color: 'var(--ink-3)', marginBottom: 4, fontWeight: 600, fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Run window</div>
+                              <div style={{ fontFamily: '"JetBrains Mono", monospace', color: 'var(--ink-2)' }}>{run.from_ts ? fmtTs(run.from_ts, tz) : '—'}</div>
+                              <div style={{ fontFamily: '"JetBrains Mono", monospace', color: 'var(--ink-2)' }}>→ {run.to_ts ? fmtTs(run.to_ts, tz) : '—'}</div>
                             </div>
                             <div>
-                              <div className="text-slate-500 mb-1">Ingestion</div>
-                              <div>Fetched: <span className="text-slate-300">{(run.fetched ?? 0).toLocaleString()}</span></div>
-                              <div>Inserted: <span className="text-emerald-400 font-medium">{(run.inserted ?? 0).toLocaleString()}</span></div>
-                              {run.skipped > 0 && <div>Dedup-skipped: <span className="text-slate-400">{run.skipped.toLocaleString()}</span></div>}
-                              {run.dlq > 0 && <div>DLQ: <span className="text-red-400">{run.dlq.toLocaleString()}</span></div>}
+                              <div style={{ color: 'var(--ink-3)', marginBottom: 4, fontWeight: 600, fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Ingestion</div>
+                              <div>Fetched: <span style={{ color: 'var(--ink-2)' }}>{(run.fetched ?? 0).toLocaleString()}</span></div>
+                              <div>Inserted: <span style={{ color: 'var(--mint)', fontWeight: 600 }}>{(run.inserted ?? 0).toLocaleString()}</span></div>
+                              {run.skipped > 0 && <div>Dedup-skipped: <span style={{ color: 'var(--ink-3)' }}>{run.skipped.toLocaleString()}</span></div>}
+                              {run.dlq > 0 && <div>DLQ: <span style={{ color: 'var(--coral)' }}>{run.dlq.toLocaleString()}</span></div>}
                             </div>
                             <div>
-                              <div className="text-slate-500 mb-1">Reconciliation</div>
+                              <div style={{ color: 'var(--ink-3)', marginBottom: 4, fontWeight: 600, fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Reconciliation</div>
                               {run.source_count != null ? (
                                 <>
-                                  <div>Source (OS): <span className="text-slate-300">{run.source_count.toLocaleString()}</span></div>
-                                  <div>ClickHouse: <span className="text-slate-300">{run.destination_count?.toLocaleString() ?? '?'}</span></div>
-                                  <div>Pending: <span className={run.remaining === 0 ? 'text-emerald-400' : 'text-amber-400'}>{run.remaining?.toLocaleString() ?? '?'}</span></div>
-                                  {pct != null && <div>Coverage: <span className={coverageColor}>{pct}%</span></div>}
+                                  <div>Source (OS): <span style={{ color: 'var(--ink-2)' }}>{run.source_count.toLocaleString()}</span></div>
+                                  <div>ClickHouse: <span style={{ color: 'var(--ink-2)' }}>{run.destination_count?.toLocaleString() ?? '?'}</span></div>
+                                  <div>Pending: <span style={{ color: run.remaining === 0 ? 'var(--mint)' : '#a37600' }}>{run.remaining?.toLocaleString() ?? '?'}</span></div>
+                                  {pct != null && <div>Coverage: <span style={{ color: coverageColor }}>{pct}%</span></div>}
                                 </>
-                              ) : <div className="text-slate-600 italic">Pending…</div>}
+                              ) : <div style={{ color: 'var(--ink-4)', fontStyle: 'italic' }}>Pending…</div>}
                             </div>
                             <div>
-                              <div className="text-slate-500 mb-1">Timing</div>
-                              <div>Started: <span className="text-slate-300">{fmtTs(run.started_at, tz)}</span></div>
-                              <div>Finished: <span className="text-slate-300">{run.finished_at ? fmtTs(run.finished_at, tz) : '—'}</span></div>
-                              <div>Duration: <span className="text-slate-300">{dur ?? '—'}</span></div>
+                              <div style={{ color: 'var(--ink-3)', marginBottom: 4, fontWeight: 600, fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Timing</div>
+                              <div>Started: <span style={{ color: 'var(--ink-2)' }}>{fmtTs(run.started_at, tz)}</span></div>
+                              <div>Finished: <span style={{ color: 'var(--ink-2)' }}>{run.finished_at ? fmtTs(run.finished_at, tz) : '—'}</span></div>
+                              <div>Duration: <span style={{ color: 'var(--ink-2)' }}>{dur ?? '—'}</span></div>
                             </div>
                           </div>
                           {run.error_msg && (
-                            <div className="mt-2 text-[11px] text-red-400 font-mono bg-red-950/20 px-3 py-1.5 rounded">{run.error_msg}</div>
+                            <div style={{ marginTop: 8, fontSize: 11, color: 'var(--coral)', fontFamily: '"JetBrains Mono", monospace', background: 'var(--coral-tint)', padding: '6px 12px', borderRadius: 6 }}>{run.error_msg}</div>
                           )}
                         </td>
                       </tr>
@@ -294,13 +292,14 @@ export default function LogHistory() {
     api.getJobs().then(setJobs).catch(() => {});
   }, []);
 
-  useEffect(() => { load(1); }, [level, pipelineId, dateFrom, dateTo, limit]);
+  useEffect(() => { if (tab === 'logs') load(1); }, [tab, level, pipelineId, dateFrom, dateTo, limit]);
 
   // Debounced search
   useEffect(() => {
+    if (tab !== 'logs') return;
     const t = setTimeout(() => load(1), 400);
     return () => clearTimeout(t);
-  }, [search]);
+  }, [search, tab]);
 
   function goPage(p) {
     if (p < 1 || p > pages) return;
@@ -327,22 +326,21 @@ export default function LogHistory() {
   const hasFilters = search || level || pipelineId || dateFrom || dateTo;
 
   return (
-    <div className="p-6 space-y-5">
+    <div style={{ maxWidth: 1200, margin: '0 auto' }}>
       {/* Header */}
-      <div className="flex items-start justify-between">
+      <div style={{ padding: '48px 48px 40px', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 24 }}>
         <div>
-          <h1 className="text-xl font-bold text-white">Log History</h1>
-          <p className="text-sm text-slate-400 mt-0.5">Audit trail and run history</p>
+          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--mint)', marginBottom: 8 }}>Log History</div>
+          <h1 style={{ fontSize: 30, fontWeight: 800, letterSpacing: '-0.03em', color: 'var(--ink)', lineHeight: 1, margin: 0 }}>Audit Trail</h1>
+          <p style={{ fontSize: 13, color: 'var(--ink-3)', marginTop: 8, letterSpacing: '0.01em' }}>Pipeline logs and run history</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingTop: 4 }}>
           <TzToggle pref={tz} onChange={changeTz} />
           {tab === 'logs' && <>
-            <button onClick={exportCsv} title="Export current page as CSV"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-700 transition-colors">
+            <button onClick={exportCsv} title="Export current page as CSV" className="btn-ghost" style={{ fontSize: 12, gap: 6 }}>
               <Download size={12} /> Export CSV
             </button>
-            <button onClick={() => load(page)} disabled={loading}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-400 hover:text-white hover:bg-slate-800 border border-slate-700 transition-colors disabled:opacity-40">
+            <button onClick={() => load(page)} disabled={loading} className="btn-ghost" style={{ fontSize: 12, gap: 6, opacity: loading ? 0.4 : 1 }}>
               <RefreshCw size={12} className={loading ? 'animate-spin' : ''} /> Refresh
             </button>
           </>}
@@ -350,69 +348,63 @@ export default function LogHistory() {
       </div>
 
       {/* Tab switcher */}
-      <div className="flex gap-1 bg-slate-900 border border-slate-800 rounded-xl p-1 w-fit">
-        <button onClick={() => setTab('logs')}
-          className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-medium transition-colors ${tab === 'logs' ? 'bg-brand-600 text-white' : 'text-slate-400 hover:text-white'}`}>
+      <div style={{ padding: '0 48px 24px', display: 'flex', gap: 4 }}>
+        <button onClick={() => setTab('logs')} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 16px', borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: 'pointer', border: tab === 'logs' ? '1px solid rgba(20,184,166,0.40)' : '1px solid var(--border)', background: tab === 'logs' ? 'var(--teal-tint)' : 'var(--surface)', color: tab === 'logs' ? 'var(--teal)' : 'var(--ink-3)', transition: 'all 150ms' }}>
           <FileText size={12} /> Pipeline Logs
         </button>
-        <button onClick={() => setTab('runs')}
-          className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-medium transition-colors ${tab === 'runs' ? 'bg-brand-600 text-white' : 'text-slate-400 hover:text-white'}`}>
+        <button onClick={() => setTab('runs')} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 16px', borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: 'pointer', border: tab === 'runs' ? '1px solid rgba(20,184,166,0.40)' : '1px solid var(--border)', background: tab === 'runs' ? 'var(--teal-tint)' : 'var(--surface)', color: tab === 'runs' ? 'var(--teal)' : 'var(--ink-3)', transition: 'all 150ms' }}>
           <Activity size={12} /> Run History
         </button>
       </div>
 
-      {tab === 'runs' && <RunHistoryTab tz={tz} />}
+      {tab === 'runs' && <div style={{ padding: '0 48px 48px' }}><RunHistoryTab tz={tz} /></div>}
 
-      {tab === 'logs' && <>
+      {tab === 'logs' && <div style={{ padding: '0 48px 48px' }}>
       {/* Filters */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-        <div className="flex items-center gap-2 mb-3">
-          <Filter size={13} className="text-slate-500" />
-          <span className="text-xs font-medium text-slate-400">Filters</span>
+      <div style={{ border: '1px solid var(--border)', borderRadius: 12, padding: 16, marginBottom: 16, background: 'var(--surface)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+          <Filter size={13} style={{ color: 'var(--ink-3)' }} />
+          <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--ink-2)' }}>Filters</span>
           {hasFilters && (
-            <button onClick={clearFilters}
-              className="ml-auto flex items-center gap-1 text-xs text-slate-500 hover:text-white transition-colors">
+            <button onClick={clearFilters} className="btn-ghost" style={{ fontSize: 11, gap: 4, marginLeft: 'auto' }}>
               <X size={11} /> Clear all
             </button>
           )}
         </div>
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
+        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr', gap: 10 }}>
           {/* Search */}
-          <div className="relative col-span-2 md:col-span-1 lg:col-span-2">
-            <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
+          <div style={{ position: 'relative' }}>
+            <Search size={12} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--ink-4)', pointerEvents: 'none' }} />
             <input
               ref={searchRef}
               type="text"
               value={search}
               onChange={e => setSearch(e.target.value)}
               placeholder="Search message…"
-              className="input w-full pl-7 text-xs h-8"
+              className="input" style={{ paddingLeft: 28, fontSize: 12, width: '100%', height: 32 }}
             />
           </div>
           {/* Level */}
-          <select value={level} onChange={e => setLevel(e.target.value)} className="input text-xs h-8">
+          <select value={level} onChange={e => setLevel(e.target.value)} className="select" style={{ fontSize: 12, height: 32 }}>
             <option value="">All levels</option>
             <option value="info">Info</option>
             <option value="warn">Warn</option>
             <option value="error">Error</option>
           </select>
-          {/* Pipeline */}
-          <select value={pipelineId} onChange={e => setPipelineId(e.target.value)} className="input text-xs h-8">
+          <select value={pipelineId} onChange={e => setPipelineId(e.target.value)} className="select" style={{ fontSize: 12, height: 32 }}>
             <option value="">All pipelines</option>
             {jobs.map(j => <option key={j.id} value={j.id}>{j.name}</option>)}
           </select>
-          {/* Date from */}
           <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
-            className="input text-xs h-8" title="From date" />
-          {/* Date to */}
+            className="input" style={{ fontSize: 12, height: 32 }} title="From date" />
           <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
-            className="input text-xs h-8" title="To date" />
+            className="input" style={{ fontSize: 12, height: 32 }} title="To date" />
         </div>
-        <div className="flex items-center gap-3 mt-3">
-          <span className="text-xs text-slate-500">Rows per page:</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
+          <span style={{ fontSize: 11, color: 'var(--ink-3)' }}>Rows per page:</span>
           {[100, 200, 500, 1000].map(n => (
             <button key={n} onClick={() => setLimit(n)}
-              className={`px-2 py-0.5 rounded text-xs transition-colors ${limit === n ? 'bg-brand-600 text-white' : 'text-slate-400 hover:text-white'}`}>
+              style={{ padding: '3px 10px', borderRadius: 6, fontSize: 11, cursor: 'pointer', border: limit === n ? '1px solid rgba(20,184,166,0.40)' : '1px solid var(--border)', background: limit === n ? 'var(--teal-tint)' : 'transparent', color: limit === n ? 'var(--teal)' : 'var(--ink-3)' }}>
               {n}
             </button>
           ))}
@@ -420,46 +412,38 @@ export default function LogHistory() {
       </div>
 
       {/* Table */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+      <div className="card-shell" style={{ overflow: 'hidden' }}>
         {/* Pagination top */}
-        <div className="px-4 py-2.5 border-b border-slate-800 flex items-center justify-between">
-          <span className="text-xs text-slate-500">
+        <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border-soft)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span style={{ fontSize: 11, color: 'var(--ink-3)' }}>
             {total > 0
               ? `Showing ${((page - 1) * limit + 1).toLocaleString()}–${Math.min(page * limit, total).toLocaleString()} of ${total.toLocaleString()}`
               : 'No results'}
           </span>
-          <div className="flex items-center gap-1">
-            <button onClick={() => goPage(1)} disabled={page <= 1 || loading}
-              className="px-2 py-1 rounded text-xs text-slate-400 hover:text-white disabled:opacity-30 transition-colors">«</button>
-            <button onClick={() => goPage(page - 1)} disabled={page <= 1 || loading}
-              className="p-1 rounded text-slate-400 hover:text-white disabled:opacity-30 transition-colors">
-              <ChevronLeft size={14} />
-            </button>
-            <span className="text-xs text-slate-400 px-2">Page {page} of {pages}</span>
-            <button onClick={() => goPage(page + 1)} disabled={page >= pages || loading}
-              className="p-1 rounded text-slate-400 hover:text-white disabled:opacity-30 transition-colors">
-              <ChevronRight size={14} />
-            </button>
-            <button onClick={() => goPage(pages)} disabled={page >= pages || loading}
-              className="px-2 py-1 rounded text-xs text-slate-400 hover:text-white disabled:opacity-30 transition-colors">»</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <button onClick={() => goPage(1)} disabled={page <= 1 || loading} className="btn-ghost" style={{ padding: '4px 8px', fontSize: 11, opacity: page<=1||loading ? 0.3 : 1 }}>«</button>
+            <button onClick={() => goPage(page - 1)} disabled={page <= 1 || loading} className="btn-ghost" style={{ padding: '4px 6px', opacity: page<=1||loading ? 0.3 : 1 }}><ChevronLeft size={13} /></button>
+            <span style={{ fontSize: 11, color: 'var(--ink-3)', padding: '0 8px' }}>Page {page} of {pages}</span>
+            <button onClick={() => goPage(page + 1)} disabled={page >= pages || loading} className="btn-ghost" style={{ padding: '4px 6px', opacity: page>=pages||loading ? 0.3 : 1 }}><ChevronRight size={13} /></button>
+            <button onClick={() => goPage(pages)} disabled={page >= pages || loading} className="btn-ghost" style={{ padding: '4px 8px', fontSize: 11, opacity: page>=pages||loading ? 0.3 : 1 }}>»</button>
           </div>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
-              <tr className="border-b border-slate-800 bg-slate-800/30">
-                <th className="px-4 py-2 text-left text-xs font-medium text-slate-500 w-44">Timestamp</th>
-                <th className="px-3 py-2 text-left text-xs font-medium text-slate-500 w-32">Pipeline</th>
-                <th className="px-3 py-2 text-left text-xs font-medium text-slate-500 w-16">Level</th>
-                <th className="px-3 py-2 text-left text-xs font-medium text-slate-500">Message</th>
+              <tr style={{ borderBottom: '1px solid var(--border)', background: 'var(--surface-alt)' }}>
+                <th style={{ padding: '8px 16px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: 'var(--ink-3)', letterSpacing: '0.06em', textTransform: 'uppercase', width: 176 }}>Timestamp</th>
+                <th style={{ padding: '8px 12px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: 'var(--ink-3)', letterSpacing: '0.06em', textTransform: 'uppercase', width: 128 }}>Pipeline</th>
+                <th style={{ padding: '8px 12px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: 'var(--ink-3)', letterSpacing: '0.06em', textTransform: 'uppercase', width: 64 }}>Level</th>
+                <th style={{ padding: '8px 12px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: 'var(--ink-3)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>Message</th>
               </tr>
             </thead>
             <tbody>
               {loading && rows.length === 0 ? (
-                <tr><td colSpan={4} className="text-center py-12 text-slate-500 text-sm">Loading…</td></tr>
+                <tr><td colSpan={4} style={{ textAlign: 'center', padding: '48px 0', fontSize: 12, color: 'var(--ink-3)' }}>Loading…</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={4} className="text-center py-12 text-slate-500 text-sm">No log entries match your filters.</td></tr>
+                <tr><td colSpan={4} style={{ textAlign: 'center', padding: '48px 0', fontSize: 12, color: 'var(--ink-3)' }}>No log entries match your filters.</td></tr>
               ) : (
                 rows.map(entry => <LogRow key={entry.id} entry={entry} tz={tz} />)
               )}
@@ -467,26 +451,17 @@ export default function LogHistory() {
           </table>
         </div>
 
-        {/* Pagination bottom */}
         {pages > 1 && (
-          <div className="px-4 py-2.5 border-t border-slate-800 flex items-center justify-end gap-1">
-            <button onClick={() => goPage(1)} disabled={page <= 1 || loading}
-              className="px-2 py-1 rounded text-xs text-slate-400 hover:text-white disabled:opacity-30 transition-colors">«</button>
-            <button onClick={() => goPage(page - 1)} disabled={page <= 1 || loading}
-              className="p-1 rounded text-slate-400 hover:text-white disabled:opacity-30 transition-colors">
-              <ChevronLeft size={14} />
-            </button>
-            <span className="text-xs text-slate-400 px-2">Page {page} of {pages}</span>
-            <button onClick={() => goPage(page + 1)} disabled={page >= pages || loading}
-              className="p-1 rounded text-slate-400 hover:text-white disabled:opacity-30 transition-colors">
-              <ChevronRight size={14} />
-            </button>
-            <button onClick={() => goPage(pages)} disabled={page >= pages || loading}
-              className="px-2 py-1 rounded text-xs text-slate-400 hover:text-white disabled:opacity-30 transition-colors">»</button>
+          <div style={{ padding: '10px 16px', borderTop: '1px solid var(--border-soft)', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 2 }}>
+            <button onClick={() => goPage(1)} disabled={page <= 1 || loading} className="btn-ghost" style={{ padding: '4px 8px', fontSize: 11, opacity: page<=1||loading ? 0.3 : 1 }}>«</button>
+            <button onClick={() => goPage(page - 1)} disabled={page <= 1 || loading} className="btn-ghost" style={{ padding: '4px 6px', opacity: page<=1||loading ? 0.3 : 1 }}><ChevronLeft size={13} /></button>
+            <span style={{ fontSize: 11, color: 'var(--ink-3)', padding: '0 8px' }}>Page {page} of {pages}</span>
+            <button onClick={() => goPage(page + 1)} disabled={page >= pages || loading} className="btn-ghost" style={{ padding: '4px 6px', opacity: page>=pages||loading ? 0.3 : 1 }}><ChevronRight size={13} /></button>
+            <button onClick={() => goPage(pages)} disabled={page >= pages || loading} className="btn-ghost" style={{ padding: '4px 8px', fontSize: 11, opacity: page>=pages||loading ? 0.3 : 1 }}>»</button>
           </div>
         )}
       </div>
-      </>}
+      </div>}
     </div>
   );
 }

@@ -2,7 +2,7 @@
 
 const router = require('express').Router();
 const { getDb } = require('../db');
-const { requireAuth } = require('../auth');
+const { requireAuth, requireAdmin } = require('../auth');
 const ch = require('../services/clickhouse');
 const { encrypt, decryptRow } = require('../crypto');
 const audit = require('../audit');
@@ -27,7 +27,7 @@ router.get('/:id', (req, res) => {
   res.json(row);
 });
 
-router.post('/', (req, res) => {
+router.post('/', requireAdmin, (req, res) => {
   const { name, url, username, password, default_database } = req.body;
   if (!name || !url || !username)
     return res.status(400).json({ error: 'name, url, username required' });
@@ -38,7 +38,7 @@ router.post('/', (req, res) => {
   res.json({ id: r.lastInsertRowid });
 });
 
-router.put('/:id', (req, res) => {
+router.put('/:id', requireAdmin, (req, res) => {
   const { name, url, username, password, default_database } = req.body;
   const db = getDb();
   const existing = db.prepare('SELECT * FROM clickhouse_clusters WHERE id=?').get(req.params.id);
@@ -60,7 +60,7 @@ router.put('/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', requireAdmin, (req, res) => {
   const row = getDb().prepare('SELECT name FROM clickhouse_clusters WHERE id=?').get(req.params.id);
   getDb().prepare('DELETE FROM clickhouse_clusters WHERE id=?').run(req.params.id);
   audit.warn('cluster', `ClickHouse cluster deleted: "${row?.name || req.params.id}"`);

@@ -248,12 +248,58 @@ function initSchema() {
   addColumnIfMissing('pipelines', 'parallel_slices', 'INTEGER DEFAULT 1');
   addColumnIfMissing('pipelines', 'max_run_minutes', 'INTEGER DEFAULT 0'); // 0 = no time limit
 
+  // Extended user fields
+  addColumnIfMissing('users', 'display_name', 'TEXT');
+  addColumnIfMissing('users', 'email', 'TEXT');
+  addColumnIfMissing('users', 'role', "TEXT DEFAULT 'analyst'");
+  addColumnIfMissing('users', 'mfa_enabled', 'INTEGER DEFAULT 0');
+  addColumnIfMissing('users', 'mfa_secret', 'TEXT');
+  addColumnIfMissing('users', 'force_password_reset', 'INTEGER DEFAULT 0');
+  addColumnIfMissing('users', 'require_mfa_enrollment', 'INTEGER DEFAULT 0');
+  addColumnIfMissing('users', 'is_active', 'INTEGER DEFAULT 1');
+  addColumnIfMissing('users', 'updated_at', 'TEXT');
+
+  // System security settings
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS system_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS login_activity (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL,
+      success INTEGER NOT NULL,
+      ip_address TEXT,
+      user_agent TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_login_activity ON login_activity(username, created_at DESC);
+  `);
+
+  // Seed default security settings
+  const defaultSettings = {
+    login_history_retention_days: '90',
+    failed_attempts_threshold: '5',
+    lockout_duration_minutes: '15',
+    min_password_length: '12',
+    password_history_depth: '5',
+    session_idle_timeout_minutes: '30',
+    mfa_backup_codes_count: '10',
+  };
+  const insertSetting = db.prepare('INSERT OR IGNORE INTO system_settings (key, value) VALUES (?, ?)');
+  for (const [k, v] of Object.entries(defaultSettings)) insertSetting.run(k, v);
+
   // Seed default admin user
   const userCount = db.prepare('SELECT COUNT(*) as c FROM users').get();
   if (userCount.c === 0) {
     const hash = bcrypt.hashSync('admin123', 10);
-    db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)').run('admin', hash);
+    db.prepare("INSERT INTO users (username, password_hash, display_name, role) VALUES (?, ?, ?, ?)").run('admin', hash, 'Administrator', 'super_admin');
     console.log('Default user created: admin / admin123');
+  } else {
+    // Ensure existing admin has super_admin role
+    db.prepare("UPDATE users SET role = 'super_admin', display_name = COALESCE(display_name, 'Administrator') WHERE username = 'admin'").run();
   }
 }
 
