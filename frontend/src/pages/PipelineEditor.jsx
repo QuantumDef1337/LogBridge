@@ -442,6 +442,7 @@ export default function PipelineEditor() {
   const [lookbackUnit, setLookbackUnit] = useState('minutes');
   const [lookbackOverridden, setLookbackOverridden] = useState(false);
   const [lookbackMode, setLookbackMode] = useState('relative'); // 'relative' | 'absolute'
+  // Absolute datetime pickers (for every_minutes / every_hours frequencies)
   const [absFrom, setAbsFrom] = useState(() => {
     const d = new Date(); d.setHours(d.getHours() - 24, 0, 0, 0);
     return d.toISOString().slice(0, 16);
@@ -450,6 +451,9 @@ export default function PipelineEditor() {
     const d = new Date(); d.setMinutes(0, 0, 0);
     return d.toISOString().slice(0, 16);
   });
+  // Absolute time-only pickers (for daily / weekly / monthly frequencies)
+  const [absFromTime, setAbsFromTime] = useState('00:00');
+  const [absToTime, setAbsToTime] = useState('23:59');
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [cronSource, setCronSource] = useState('builder'); // 'builder' | 'advanced'
   const [advancedCronInput, setAdvancedCronInput] = useState('');
@@ -1262,6 +1266,18 @@ export default function PipelineEditor() {
                                       setLookbackMode(mode);
                                       if (mode === 'relative') {
                                         handleLookbackChange(lookbackValue, lookbackUnit);
+                                      } else {
+                                        // Pre-fill time pickers from current lookback when switching to absolute
+                                        const isTimeOnly = ['daily', 'weekly', 'monthly'].includes(cronBuilder.type);
+                                        if (isTimeOnly) {
+                                          // To = 00:00 (midnight / trigger), From = midnight - lookbackH
+                                          const lbH = lookbackToHours(lookbackValue, lookbackUnit);
+                                          const fromMins = Math.round(((24 - lbH) % 24) * 60);
+                                          const fh = String(Math.floor(fromMins / 60) % 24).padStart(2, '0');
+                                          const fm = String(fromMins % 60).padStart(2, '0');
+                                          setAbsFromTime(`${fh}:${fm}`);
+                                          setAbsToTime('00:00');
+                                        }
                                       }
                                     }}
                                     className={`px-4 py-1.5 capitalize transition-colors ${
@@ -1292,49 +1308,98 @@ export default function PipelineEditor() {
                                     </button>
                                   )}
                                 </div>
-                              ) : (
-                                <div className="space-y-2">
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-xs text-slate-400 w-8">From</span>
-                                    <input type="datetime-local" className="input flex-1 text-sm font-mono"
-                                      value={absFrom}
-                                      onChange={e => {
-                                        const from = e.target.value;
-                                        setAbsFrom(from);
-                                        if (from && absTo) {
-                                          const diffH = (new Date(absTo) - new Date(from)) / 3600000;
-                                          if (diffH > 0) { setLookbackOverridden(true); set('schedule_lookback_hours', diffH); }
-                                        }
-                                      }} />
+                              ) : (() => {
+                                // Daily / weekly / monthly → time-only pickers (no date needed for recurring)
+                                const isTimeOnly = ['daily', 'weekly', 'monthly'].includes(cronBuilder.type);
+
+                                function timeToMins(t) {
+                                  const [h, m] = t.split(':').map(Number);
+                                  return h * 60 + m;
+                                }
+                                function fmtWindowLabel(diffMins) {
+                                  if (diffMins < 60) return `${diffMins} minute${diffMins !== 1 ? 's' : ''}`;
+                                  const h = diffMins / 60;
+                                  if (h % 24 === 0) return `${h / 24} day${h / 24 !== 1 ? 's' : ''}`;
+                                  return `${Number.isInteger(h) ? h : h.toFixed(1)} hours`;
+                                }
+
+                                if (isTimeOnly) {
+                                  const fromMins = timeToMins(absFromTime);
+                                  const toMins = timeToMins(absToTime);
+                                  let diffMins = toMins - fromMins;
+                                  if (diffMins <= 0) diffMins += 24 * 60; // crosses midnight
+                                  const windowLabel = fmtWindowLabel(diffMins);
+                                  return (
+                                    <div className="space-y-2">
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-xs text-slate-400 w-8">From</span>
+                                        <input type="time" className="input flex-1 text-sm font-mono"
+                                          value={absFromTime}
+                                          onChange={e => {
+                                            const t = e.target.value;
+                                            setAbsFromTime(t);
+                                            const fm = timeToMins(t);
+                                            const tm = timeToMins(absToTime);
+                                            let d = tm - fm; if (d <= 0) d += 1440;
+                                            setLookbackOverridden(true);
+                                            set('schedule_lookback_hours', d / 60);
+                                          }} />
+                                      </div>
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-xs text-slate-400 w-8">To</span>
+                                        <input type="time" className="input flex-1 text-sm font-mono"
+                                          value={absToTime}
+                                          onChange={e => {
+                                            const t = e.target.value;
+                                            setAbsToTime(t);
+                                            const fm = timeToMins(absFromTime);
+                                            const tm = timeToMins(t);
+                                            let d = tm - fm; if (d <= 0) d += 1440;
+                                            setLookbackOverridden(true);
+                                            set('schedule_lookback_hours', d / 60);
+                                          }} />
+                                      </div>
+                                      <p className="text-xs text-teal-400">Window: {windowLabel}{diffMins > toMins - fromMins ? ' (crosses midnight)' : ''}</p>
+                                    </div>
+                                  );
+                                }
+
+                                // every_minutes / every_hours → full datetime pickers
+                                const validRange = absFrom && absTo && new Date(absTo) > new Date(absFrom);
+                                const diffH = validRange ? (new Date(absTo) - new Date(absFrom)) / 3600000 : 0;
+                                return (
+                                  <div className="space-y-2">
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-xs text-slate-400 w-8">From</span>
+                                      <input type="datetime-local" className="input flex-1 text-sm font-mono"
+                                        value={absFrom}
+                                        onChange={e => {
+                                          const from = e.target.value;
+                                          setAbsFrom(from);
+                                          if (from && absTo) {
+                                            const d = (new Date(absTo) - new Date(from)) / 3600000;
+                                            if (d > 0) { setLookbackOverridden(true); set('schedule_lookback_hours', d); }
+                                          }
+                                        }} />
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-xs text-slate-400 w-8">To</span>
+                                      <input type="datetime-local" className="input flex-1 text-sm font-mono"
+                                        value={absTo}
+                                        onChange={e => {
+                                          const to = e.target.value;
+                                          setAbsTo(to);
+                                          if (absFrom && to) {
+                                            const d = (new Date(to) - new Date(absFrom)) / 3600000;
+                                            if (d > 0) { setLookbackOverridden(true); set('schedule_lookback_hours', d); }
+                                          }
+                                        }} />
+                                    </div>
+                                    {validRange && <p className="text-xs text-teal-400">Window: {fmtWindowLabel(Math.round(diffH * 60))}</p>}
+                                    {absFrom && absTo && !validRange && <p className="text-xs text-red-400">"To" must be after "From".</p>}
                                   </div>
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-xs text-slate-400 w-8">To</span>
-                                    <input type="datetime-local" className="input flex-1 text-sm font-mono"
-                                      value={absTo}
-                                      onChange={e => {
-                                        const to = e.target.value;
-                                        setAbsTo(to);
-                                        if (absFrom && to) {
-                                          const diffH = (new Date(to) - new Date(absFrom)) / 3600000;
-                                          if (diffH > 0) { setLookbackOverridden(true); set('schedule_lookback_hours', diffH); }
-                                        }
-                                      }} />
-                                  </div>
-                                  {absFrom && absTo && new Date(absTo) > new Date(absFrom) && (
-                                    <p className="text-xs text-teal-400">
-                                      Window: {(() => {
-                                        const h = (new Date(absTo) - new Date(absFrom)) / 3600000;
-                                        if (h < 1) return `${Math.round(h * 60)} minutes`;
-                                        if (h % 24 === 0) return `${h / 24} day${h / 24 !== 1 ? 's' : ''}`;
-                                        return `${h % 1 === 0 ? h : h.toFixed(1)} hours`;
-                                      })()}
-                                    </p>
-                                  )}
-                                  {absFrom && absTo && new Date(absTo) <= new Date(absFrom) && (
-                                    <p className="text-xs text-red-400">"To" must be after "From".</p>
-                                  )}
-                                </div>
-                              )}
+                                );
+                              })()}
 
                               {showOverlapWarn && lookbackMode === 'relative' && (
                                 <p className="text-xs text-amber-400 mt-1.5">
@@ -1349,7 +1414,8 @@ export default function PipelineEditor() {
                                 <div className="text-white font-medium">{description}</div>
                                 {nextRunStr && <div className="text-slate-400">Next run: <span className="text-brand-300">{nextRunStr}</span></div>}
                                 {nextRunDate && (() => {
-                                  const lbMs = lookbackToHours(lookbackValue, lookbackUnit) * 3600 * 1000;
+                                  const lbH = form.schedule_lookback_hours || lookbackToHours(lookbackValue, lookbackUnit);
+                                  const lbMs = lbH * 3600 * 1000;
                                   const from = new Date(nextRunDate.getTime() - lbMs);
                                   const fmtDt = d => d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
                                   return (
@@ -1357,7 +1423,11 @@ export default function PipelineEditor() {
                                       Pulls: <span className="text-teal-300">{fmtDt(from)}</span>
                                       {' → '}
                                       <span className="text-teal-300">{fmtDt(nextRunDate)}</span>
-                                      <span className="text-slate-500 ml-1">({lookbackValue} {lookbackUnit} window)</span>
+                                      <span className="text-slate-500 ml-1">({
+                                        lbH < 1 ? `${Math.round(lbH * 60)} min` :
+                                        lbH % 24 === 0 ? `${lbH / 24} day${lbH / 24 !== 1 ? 's' : ''}` :
+                                        `${Number.isInteger(lbH) ? lbH : lbH.toFixed(1)}h`
+                                      } window)</span>
                                     </div>
                                   );
                                 })()}
